@@ -170,6 +170,57 @@ func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result
 	}
 }
 
+// writeTx runs fn inside a BEGIN IMMEDIATE transaction on one dedicated
+// connection, retrying the whole transaction on SQLITE_BUSY.
+//
+// IMMEDIATE takes the write lock up front. Every multi-statement write in pager
+// reads state and then writes a decision derived from it — the host-key
+// transfer here, and later the breaker count before an INSERT and the candidate
+// re-validation before a claim. A deferred transaction would take the lock only
+// at the first write, by which point the read it was based on may no longer
+// hold.
+//
+// The transaction is driven with explicit statements for the same reason
+// migrate is: database/sql cannot express IMMEDIATE.
+func (s *Store) writeTx(ctx context.Context, fn func(context.Context, *sql.Conn) error) error {
+	for attempt := 0; ; attempt++ {
+		err := s.writeTxOnce(ctx, fn)
+		if err == nil || !isBusy(err) || attempt >= busyRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(1<<attempt) * 10 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Store) writeTxOnce(ctx context.Context, fn func(context.Context, *sql.Conn) error) (err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("write connection: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck // returning the conn to the pool
+
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	if err = fn(ctx, conn); err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
 // isBusy reports whether err is SQLITE_BUSY. Extended result codes carry the
 // primary code in the low byte, so mask before comparing.
 func isBusy(err error) bool {
