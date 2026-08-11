@@ -51,13 +51,19 @@ make build          # ~/.local/bin/pager 로 빌드. CGO 불필요
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "pager hook UserPromptSubmit" }] }
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "pager hook", "timeout": 10000, "statusMessage": "pager delivery" }
+      ]}
     ],
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "pager hook SessionStart" }] }
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "pager hook", "timeout": 10000, "statusMessage": "pager delivery" }
+      ]}
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "pager hook Stop" }] }
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "pager hook", "timeout": 10000, "statusMessage": "pager delivery" }
+      ]}
     ]
   }
 }
@@ -68,17 +74,38 @@ make build          # ~/.local/bin/pager 로 빌드. CGO 불필요
 `~/.codex/config.toml`:
 
 ```toml
-[[hooks]]
-event = "UserPromptSubmit"
-command = "pager hook UserPromptSubmit"
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "pager hook"
+timeout = 10
+statusMessage = "pager delivery"
 
-[[hooks]]
-event = "Stop"
-command = "pager hook Stop"
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "pager hook"
+timeout = 10
+statusMessage = "pager delivery"
 ```
 
-> **`UserPromptSubmit`이 필수 경로다.** 양쪽 툴에서 검증된 이벤트는 이것이고, Codex의 Stop 훅이
-> `additionalContext`를 채택하는지는 미검증이라 Stop은 선택 경로로 둔다.
+### 등록에 관해 알아둘 것
+
+**이벤트명을 인자로 주지 않는 형태(`pager hook`)를 권한다.** 페이로드의 `hook_event_name`을
+쓰므로 오타가 불가능하다. 명시하고 싶으면 `pager hook UserPromptSubmit`처럼 쓰면 되고,
+**대소문자는 가리지 않는다** — 다른 도구들이 같은 이벤트를 소문자로 쓰는 설정 파일에 나란히
+들어가는 일이 흔해서다.
+
+내부 타임아웃은 5초로 고정돼 있다. 바깥 타임아웃은 그보다 여유 있게 준다 (Claude는 ms, Codex는 초).
+
+| 이벤트 | 등급 | 빠지면 |
+| --- | --- | --- |
+| `UserPromptSubmit` | **필수** | 인과 리셋이 안 일어나 hop이 영구 누적된다. 세션 기록·배달도 여기 의존 |
+| `SessionStart` | 권장 | 새 세션이 대기 메시지·고아 수신함 안내를 다음 프롬프트까지 못 본다 |
+| `Stop` | 선택 | 턴 종료 직후 배달이 없다. 다음 사용자 프롬프트까지 대기 |
+
+> **Codex에는 Stop을 걸지 않는 것을 권한다.** Codex Stop 훅이 `additionalContext`를 채택하는지는
+> 미검증이다. 양쪽에서 검증된 필수 경로는 `UserPromptSubmit`이다.
 
 ### MCP 등록 (선택)
 

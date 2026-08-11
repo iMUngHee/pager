@@ -229,6 +229,64 @@ func TestRealPromptResetsTheChain(t *testing.T) {
 	}
 }
 
+// TestEventNameIsCaseInsensitive covers the registration mistake that costs the
+// most to diagnose: other tools spell these events in lowercase, and matching
+// exactly would keep delivering while quietly dropping the causal reset — so
+// depth accumulates and sends start failing days later for no visible reason.
+func TestEventNameIsCaseInsensitive(t *testing.T) {
+	for _, spelling := range []string{"userpromptsubmit", "UserPromptSubmit", "USERPROMPTSUBMIT"} {
+		t.Run(spelling, func(t *testing.T) {
+			st := newEnv(t)
+			seedInbox(t, st, "s1", "claude", "inbox")
+
+			run(t, spelling, claudePayload("s1", "a real prompt"))
+
+			var epoch int64
+			if err := st.DB().QueryRowContext(t.Context(),
+				"SELECT causal_epoch FROM sessions WHERE session_id = ?", "s1").Scan(&epoch); err != nil {
+				t.Fatalf("read epoch: %v", err)
+			}
+			if epoch != 1 {
+				t.Errorf("causal_epoch = %d after %q, want 1 — the reset did not fire", epoch, spelling)
+			}
+		})
+	}
+}
+
+// TestEmittedEventNameIsCanonical: whatever spelling the registration used, the
+// host has to receive the one it recognises.
+func TestEmittedEventNameIsCanonical(t *testing.T) {
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "claude", "inbox")
+	queue(t, st, "inbox", "@a", "hello")
+
+	raw := run(t, "userpromptsubmit", claudePayload("s1", "go"))
+	var parsed struct {
+		HookSpecificOutput struct {
+			HookEventName string `json:"hookEventName"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, raw)
+	}
+	if got := parsed.HookSpecificOutput.HookEventName; got != EventUserPromptSubmit {
+		t.Errorf("hookEventName = %q, want %q", got, EventUserPromptSubmit)
+	}
+}
+
+// TestOrphanHintGatingIsCaseInsensitive: the other behaviour keyed on the event
+// name. Lowercase Stop must still suppress the hint.
+func TestOrphanHintGatingIsCaseInsensitive(t *testing.T) {
+	st := newEnv(t)
+	orphanWorkspace(t, st)
+	seedInbox(t, st, "fresh", "claude", "fresh-inbox")
+
+	payload := fmt.Sprintf(`{"session_id":"fresh","cwd":%q,"hook_event_name":"Stop"}`, workspace)
+	if got := run(t, "stop", payload); got != "" {
+		t.Errorf("lowercase stop emitted %q, want the hint suppressed", got)
+	}
+}
+
 func TestPromptlessEventDoesNotReset(t *testing.T) {
 	st := newEnv(t)
 	seedInbox(t, st, "s1", "claude", "inbox")

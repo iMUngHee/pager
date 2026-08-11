@@ -69,6 +69,7 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	if event == "" {
 		event = in.HookEventName
 	}
+	event = canonicalEvent(event)
 	if in.SessionID == "" {
 		return // nothing to attribute this run to
 	}
@@ -177,6 +178,24 @@ func collect(ctx context.Context, st *store.Store, session, root, tool, event st
 // reasons, is what still holds in that case.
 func startsNewTurn(event string, in Input) bool {
 	return event == EventUserPromptSubmit && strings.TrimSpace(in.Prompt) != ""
+}
+
+// canonicalEvent maps an event name onto its canonical spelling, ignoring case.
+//
+// Registrations are written by hand, next to other tools' hooks that spell the
+// same events in lowercase, so the wrong case is a matter of when rather than
+// if. Matching exactly would fail in the worst possible way: delivery keeps
+// working, so the registration looks correct, while the causal reset silently
+// stops happening and depth accumulates until sends start being refused days
+// later. Normalising here also means the emitted hookEventName carries the
+// spelling the host expects rather than whatever was typed.
+func canonicalEvent(event string) string {
+	for _, known := range []string{EventUserPromptSubmit, EventSessionStart, EventStop, EventSubagentStop} {
+		if strings.EqualFold(event, known) {
+			return known
+		}
+	}
+	return event
 }
 
 // workspaceRoot resolves the workspace this session belongs to. Codex puts it
