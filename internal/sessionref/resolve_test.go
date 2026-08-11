@@ -203,6 +203,17 @@ func TestInstanceValid(t *testing.T) {
 	}
 }
 
+// TestDetectPinnedToUnknownClientFailsClosed: naming a client pager does not
+// know must mean no host, not any host. Scripts rely on it to declare
+// themselves outside a session.
+func TestDetectPinnedToUnknownClientFailsClosed(t *testing.T) {
+	t.Setenv("PAGER_CLIENT", "none")
+	client, host, ok := Detect()
+	if ok || client != Unknown || host.Valid() {
+		t.Errorf("Detect() = (%q, %+v, %v), want no host", client, host, ok)
+	}
+}
+
 // TestDetectPinnedToAbsentClient exercises the real ancestry walk in the
 // failing direction. The test binary's ancestors are not named "codex", so
 // detection must terminate and report failure rather than guess.
