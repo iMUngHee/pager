@@ -18,13 +18,10 @@ import (
 	"github.com/unghee/pager/internal/clock"
 	"github.com/unghee/pager/internal/deliver"
 	"github.com/unghee/pager/internal/hookio"
+	"github.com/unghee/pager/internal/mcpsrv"
 	"github.com/unghee/pager/internal/sessionref"
 	"github.com/unghee/pager/internal/store"
 )
-
-// errNotImplemented marks a subcommand that is dispatched but whose behaviour
-// lands in a later implementation step.
-var errNotImplemented = errors.New("not implemented yet")
 
 // command is one pager subcommand. This table is the single source of truth
 // for both dispatch and help output, so the two cannot drift apart.
@@ -44,10 +41,8 @@ var commands = []command{
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
-	{"mcp", "", "Serve the MCP stdio server", todo},
+	{"mcp", "", "Serve the MCP stdio server", serveMCP},
 }
-
-func todo([]string) error { return errNotImplemented }
 
 // openStore opens the standard database with the real clock.
 func openStore(ctx context.Context) (*store.Store, error) {
@@ -287,6 +282,17 @@ func prune(args []string) error {
 	}
 	fmt.Printf("%d message(s) deleted\n", res.Deleted)
 	return nil
+}
+
+// serveMCP runs the MCP stdio server until the client disconnects.
+func serveMCP([]string) error {
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return mcpsrv.New(st).Serve(ctx, os.Stdin, os.Stdout)
 }
 
 // hookCmd runs one hook invocation and always succeeds.
