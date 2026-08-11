@@ -42,8 +42,15 @@ type Store struct {
 	clock clock.Clock
 }
 
-// DefaultPath returns the standard database location, ~/.pager/msg.db.
+// DefaultPath returns the database location: PAGER_DB when set, otherwise
+// ~/.pager/msg.db.
+//
+// The override exists so a test run — or a second, isolated set of sessions —
+// never has to touch the real inbox.
 func DefaultPath() (string, error) {
+	if override := os.Getenv("PAGER_DB"); override != "" {
+		return override, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)

@@ -14,10 +14,13 @@ const DefaultStale = 12 * time.Hour
 
 // SessionRecord is what a hook knows about its own session.
 type SessionRecord struct {
-	ID    string
+	ID string
+	// Tool, Root and PMRef leave any existing value in place when empty. A
+	// hook that momentarily cannot detect its host still refreshes the
+	// heartbeat; it must not blank out what the session already knows.
 	Tool  string
 	Root  string
-	PMRef string // optional KEY/id convenience; empty leaves any existing value
+	PMRef string
 
 	// HostClient, HostPid and HostStart bind the session to its host process.
 	// A zero HostPid means detection failed, in which case any existing
@@ -48,8 +51,8 @@ func (s *Store) RecordSession(ctx context.Context, rec SessionRecord) error {
 				INSERT INTO sessions(session_id, tool, root, pm_ref, heartbeat_at)
 				VALUES (?, ?, ?, ?, ?)
 				ON CONFLICT(session_id) DO UPDATE SET
-					tool         = excluded.tool,
-					root         = excluded.root,
+					tool         = COALESCE(NULLIF(excluded.tool, ''), sessions.tool),
+					root         = COALESCE(NULLIF(excluded.root, ''), sessions.root),
 					pm_ref       = COALESCE(excluded.pm_ref, sessions.pm_ref),
 					heartbeat_at = excluded.heartbeat_at`,
 				rec.ID, rec.Tool, rec.Root, pmRef, now)
@@ -74,8 +77,8 @@ func (s *Store) RecordSession(ctx context.Context, rec SessionRecord) error {
 			INSERT INTO sessions(session_id, tool, root, pm_ref, heartbeat_at, host_client, host_pid, host_start)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
-				tool         = excluded.tool,
-				root         = excluded.root,
+				tool         = COALESCE(NULLIF(excluded.tool, ''), sessions.tool),
+				root         = COALESCE(NULLIF(excluded.root, ''), sessions.root),
 				pm_ref       = COALESCE(excluded.pm_ref, sessions.pm_ref),
 				heartbeat_at = excluded.heartbeat_at,
 				host_client  = excluded.host_client,
