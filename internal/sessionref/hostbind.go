@@ -55,9 +55,18 @@ func Normalize(v string) string {
 // PAGER_CLIENT pins the label when it is set; otherwise either known client is
 // accepted. PAGER_ is not a CONTEXT_ prefix, so it survives Claude Code's
 // environment scrub.
+//
+// Setting it to something unrecognised means no host, not "any host". An
+// operator who names a client and gets a different one silently attributed is
+// worse served than one whose send is refused, and it gives a script a way to
+// say it is deliberately outside any session.
 func Detect() (string, Instance, bool) {
 	candidates := []string{Claude, Codex}
-	if pinned := Normalize(os.Getenv("PAGER_CLIENT")); pinned != Unknown {
+	if raw := strings.TrimSpace(os.Getenv("PAGER_CLIENT")); raw != "" {
+		pinned := Normalize(raw)
+		if pinned == Unknown {
+			return Unknown, Instance{}, false
+		}
 		candidates = []string{pinned}
 	}
 

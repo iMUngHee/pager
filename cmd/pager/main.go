@@ -12,9 +12,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/unghee/pager/internal/clock"
+	"github.com/unghee/pager/internal/deliver"
 	"github.com/unghee/pager/internal/hookio"
 	"github.com/unghee/pager/internal/sessionref"
 	"github.com/unghee/pager/internal/store"
@@ -34,13 +36,13 @@ type command struct {
 }
 
 var commands = []command{
-	{"send", "<target> <body> [--human] [--session <id>]", "Leave a message for another session", todo},
+	{"send", "<target> <body> [--human] [--session <id>] [--label <name>]", "Leave a message for another session", send},
 	{"attach", "[--session <id>] [--tool <tool>] [--root <dir>] [--pm-ref <ref>]", "Register this session as a delivery target", attach},
-	{"alias", "<name> [--session <id>]", "Point a short name at a session", todo},
-	{"claim", "<name>", "Take over an alias whose session is offline", todo},
-	{"ls", "[--expired]", "List messages addressed to this session", todo},
+	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
+	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
+	{"ls", "[--expired] [--session <id>]", "List messages addressed to this session", list},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
-	{"prune", "[--dry-run]", "Delete messages past the retention window", todo},
+	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", todo},
 }
@@ -62,6 +64,229 @@ func resolver(st *store.Store) *sessionref.Resolver {
 	return sessionref.New(func(ctx context.Context, client string, host sessionref.Instance) (string, error) {
 		return st.SessionByHost(ctx, client, host.Pid, host.Start, store.DefaultStale)
 	})
+}
+
+// resolveSession applies the shared resolver and returns the session id, or an
+// error naming what the caller can do about it.
+func resolveSession(ctx context.Context, st *store.Store, flagValue string) (string, error) {
+	ref, err := resolver(st).Resolve(ctx, flagValue)
+	if err != nil {
+		return "", err
+	}
+	if !ref.Attributed() {
+		return "", deliver.ErrUnattributed
+	}
+	return ref.SessionID, nil
+}
+
+// send leaves a message for another session.
+//
+// The target is resolved before the send so an unknown or ambiguous name fails
+// with the candidates rather than queueing mail nobody will read.
+func send(args []string) error {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	session := fs.String("session", "", "sending session id")
+	human := fs.Bool("human", false, "assert this send is operator-initiated, not agent-initiated")
+	label := fs.String("label", "", "how the recipient sees the sender")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return errors.New("usage: pager send <target> <body>")
+	}
+	target, body := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	ref, err := resolver(st).Resolve(ctx, *session)
+	if err != nil {
+		return err
+	}
+	// --human is an operator assertion, so it is the one way to send without a
+	// resolvable session. Everything else is refused rather than recorded
+	// anonymously.
+	if !ref.Attributed() && !*human {
+		return deliver.ErrUnattributed
+	}
+
+	found, err := deliver.ResolveTarget(ctx, st, target)
+	if err != nil {
+		return err
+	}
+	if *label == "" {
+		if *label, err = deliver.PrimaryAlias(ctx, st, ref.SessionID); err != nil {
+			return err
+		}
+	}
+	if *label == "" {
+		*label = "human"
+	}
+
+	sent, err := deliver.Send(ctx, st, deliver.SendRequest{
+		Alias: found.Alias, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("sent #%d to %s (hop %d, %s)\n", sent.ID, found.Alias, sent.Hop, sent.Origin)
+	if found.SessionID == "" {
+		fmt.Printf("note: %s has no live session — it will be delivered when one claims the alias\n", found.Alias)
+	}
+	return nil
+}
+
+// alias points a name at this session.
+func alias(args []string) error {
+	fs := flag.NewFlagSet("alias", flag.ContinueOnError)
+	session := fs.String("session", "", "session id to name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: pager alias <name>")
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	id, err := resolveSession(ctx, st, *session)
+	if err != nil {
+		return err
+	}
+	ok, err := deliver.SetAlias(ctx, st, fs.Arg(0), id)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%q belongs to another session; take it over with: pager claim %s", fs.Arg(0), fs.Arg(0))
+	}
+	fmt.Printf("%s now points at %s\n", fs.Arg(0), id)
+	return nil
+}
+
+// claim takes over an alias whose holder is gone.
+func claim(args []string) error {
+	fs := flag.NewFlagSet("claim", flag.ContinueOnError)
+	session := fs.String("session", "", "session id taking over")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: pager claim <name>")
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	id, err := resolveSession(ctx, st, *session)
+	if err != nil {
+		return err
+	}
+	ok, err := deliver.ClaimAlias(ctx, st, fs.Arg(0), id, store.DefaultStale)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("cannot take over %q: it does not exist, its holder is still active, or it belongs to another workspace", fs.Arg(0))
+	}
+	fmt.Printf("%s is now yours\n", fs.Arg(0))
+	return nil
+}
+
+// list shows what is addressed to this session.
+func list(args []string) error {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	session := fs.String("session", "", "session id to list for")
+	expired := fs.Bool("expired", false, "show only messages past the automatic delivery window")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	id, err := resolveSession(ctx, st, *session)
+	if err != nil {
+		return err
+	}
+	messages, err := deliver.List(ctx, st, id, *expired, deliver.LimitsFromEnv())
+	if err != nil {
+		return err
+	}
+	if len(messages) == 0 {
+		fmt.Println("nothing here")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tINBOX\tFROM\tSTATE\tBODY")
+	for _, m := range messages {
+		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, m.Sender, state(m), firstLine(m.Body))
+	}
+	return tw.Flush()
+}
+
+func state(m deliver.Listed) string {
+	switch {
+	case m.Delivered:
+		return "delivered"
+	case m.Expired:
+		return "expired"
+	default:
+		return "waiting"
+	}
+}
+
+func firstLine(body string) string {
+	line, _, cut := strings.Cut(body, "\n")
+	if cut {
+		return line + " …"
+	}
+	return line
+}
+
+// prune deletes messages past the retention window.
+func prune(args []string) error {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "report what would be deleted, delete nothing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	res, err := st.PruneNow(ctx, store.DefaultRetention, *dryRun)
+	if err != nil {
+		return err
+	}
+	if *dryRun {
+		fmt.Printf("%d message(s) would be deleted\n", res.Deleted)
+		return nil
+	}
+	fmt.Printf("%d message(s) deleted\n", res.Deleted)
+	return nil
 }
 
 // hookCmd runs one hook invocation and always succeeds.
