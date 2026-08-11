@@ -114,12 +114,9 @@ func send(args []string) error {
 		return err
 	}
 	if *label == "" {
-		if *label, err = deliver.PrimaryAlias(ctx, st, ref.SessionID); err != nil {
+		if *label, err = deliver.SenderLabel(ctx, st, ref.SessionID); err != nil {
 			return err
 		}
-	}
-	if *label == "" {
-		*label = "human"
 	}
 
 	sent, err := deliver.Send(ctx, st, deliver.SendRequest{

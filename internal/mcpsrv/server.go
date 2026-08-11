@@ -119,7 +119,7 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if label == "" {
-		if label, err = deliver.PrimaryAlias(ctx, s.st, sender); err != nil {
+		if label, err = deliver.SenderLabel(ctx, s.st, sender); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 	}
