@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/unghee/pager/internal/clock"
+	"github.com/unghee/pager/internal/hookio"
 	"github.com/unghee/pager/internal/sessionref"
 	"github.com/unghee/pager/internal/store"
 )
@@ -40,7 +41,7 @@ var commands = []command{
 	{"ls", "[--expired]", "List messages addressed to this session", todo},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", todo},
-	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", todo},
+	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", todo},
 }
 
@@ -61,6 +62,24 @@ func resolver(st *store.Store) *sessionref.Resolver {
 	return sessionref.New(func(ctx context.Context, client string, host sessionref.Instance) (string, error) {
 		return st.SessionByHost(ctx, client, host.Pid, host.Start, store.DefaultStale)
 	})
+}
+
+// hookCmd runs one hook invocation and always succeeds.
+//
+// Nothing it can encounter is worth failing over: a non-zero exit or a stray
+// line on stderr reaches the host, and a paging system that disrupts the
+// sessions it pages is worse than one that quietly delivers nothing. The
+// timeout exists for the same reason — a wedged database must not hold the
+// session open.
+func hookCmd(args []string) error {
+	var event string
+	if len(args) > 0 {
+		event = args[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookio.Deadline)
+	defer cancel()
+	hookio.Run(ctx, event, os.Stdin, os.Stdout)
+	return nil
 }
 
 // attach records the calling session and binds it to the host process, which
