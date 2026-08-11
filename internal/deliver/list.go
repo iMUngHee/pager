@@ -60,9 +60,28 @@ func List(ctx context.Context, st *store.Store, session string, expiredOnly bool
 	return out, rows.Err()
 }
 
+// SenderLabel is how a sender is shown to its recipient.
+//
+// An alias when it has one, its session id otherwise, and "human" only when
+// there is no session at all. Falling back to "human" for a session that simply
+// has no alias would be a lie the recipient acts on: --human is a meaningful
+// claim in this system, and an agent's message must never wear it.
+func SenderLabel(ctx context.Context, st *store.Store, session string) (string, error) {
+	if session == "" {
+		return "human", nil
+	}
+	alias, err := PrimaryAlias(ctx, st, session)
+	if err != nil {
+		return "", err
+	}
+	if alias != "" {
+		return alias, nil
+	}
+	return session, nil
+}
+
 // PrimaryAlias returns the alias a session is best known by, or "" when it has
-// none. It is how a send labels itself so the recipient sees a name rather than
-// a session id.
+// none.
 func PrimaryAlias(ctx context.Context, st *store.Store, session string) (string, error) {
 	var alias string
 	err := st.DB().QueryRowContext(ctx,
