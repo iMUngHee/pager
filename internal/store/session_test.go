@@ -153,7 +153,7 @@ func TestRecordSessionRefreshesHeartbeatAndKeepsPMRef(t *testing.T) {
 	if err := s.RecordSession(ctx, rec); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	first := s.now()
+	first := s.Now()
 
 	fake.Advance(time.Hour)
 	bare := hostRecord("s1") // no PMRef

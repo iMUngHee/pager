@@ -31,7 +31,7 @@ func newStore(t *testing.T) (*Store, *clock.Fake) {
 // candidate once it ages past retention.
 func insertDelivered(t *testing.T, s *Store, ago time.Duration) int64 {
 	t.Helper()
-	created := s.now() - ago.Milliseconds()
+	created := s.Now() - ago.Milliseconds()
 	res, err := s.db.ExecContext(t.Context(), `
 		INSERT INTO messages(alias, body, hop, origin, created_at, delivered_at)
 		VALUES ('inbox', 'body', 0, 'human', ?, ?)`, created, created)
@@ -162,7 +162,7 @@ func TestConcurrentMigrate(t *testing.T) {
 	for i, st := range stores {
 		if _, err := st.db.ExecContext(t.Context(),
 			"INSERT INTO messages(alias, body, hop, origin, created_at) VALUES ('inbox', 'x', 0, 'human', ?)",
-			st.now()); err != nil {
+			st.Now()); err != nil {
 			t.Fatalf("opener %d write: %v", i, err)
 		}
 	}
@@ -209,7 +209,7 @@ func TestPruneNowDryRunDeletesNothing(t *testing.T) {
 // undelivered mail.
 func TestPruneSkipsUndelivered(t *testing.T) {
 	s, _ := newStore(t)
-	created := s.now() - (31 * 24 * time.Hour).Milliseconds()
+	created := s.Now() - (31 * 24 * time.Hour).Milliseconds()
 	if _, err := s.db.ExecContext(t.Context(),
 		"INSERT INTO messages(alias, body, hop, origin, created_at) VALUES ('inbox', 'b', 0, 'human', ?)",
 		created); err != nil {
@@ -241,7 +241,7 @@ func TestPruneSkipsReferenced(t *testing.T) {
 	// A live session whose causal representative is one of the expired rows.
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions(session_id, tool, root, heartbeat_at, last_inbound_id, last_inbound_seq)
-		VALUES ('s1', 'claude', '/tmp/w', ?, ?, 1)`, s.now(), inboundID); err != nil {
+		VALUES ('s1', 'claude', '/tmp/w', ?, ?, 1)`, s.Now(), inboundID); err != nil {
 		t.Fatalf("insert session: %v", err)
 	}
 	// A later message caused by another expired row. It is itself expired and
@@ -250,7 +250,7 @@ func TestPruneSkipsReferenced(t *testing.T) {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO messages(alias, body, hop, origin, cause_id, created_at, delivered_at)
 		VALUES ('inbox', 'child', 1, 'caused', ?, ?, ?)`,
-		causeID, s.now()-old, s.now()-old)
+		causeID, s.Now()-old, s.Now()-old)
 	if err != nil {
 		t.Fatalf("insert caused message: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestHostKeyUniqueness(t *testing.T) {
 	insert := func(id string, pid any) error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO sessions(session_id, tool, root, heartbeat_at, host_client, host_pid, host_start)
-			VALUES (?, 'claude', '/tmp/w', ?, 'claude', ?, 100)`, id, s.now(), pid)
+			VALUES (?, 'claude', '/tmp/w', ?, 'claude', ?, 100)`, id, s.Now(), pid)
 		return err
 	}
 
