@@ -92,9 +92,14 @@ func Open(ctx context.Context, path string, c clock.Clock) (*Store, error) {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
-// now is the current time in Unix milliseconds, the unit of every timestamp
-// column in the schema.
-func (s *Store) now() int64 { return s.clock.Now().UnixMilli() }
+// Now is the current time in Unix milliseconds, the unit of every timestamp
+// column in the schema. It comes from the injected clock, so a test can move it.
+func (s *Store) Now() int64 { return s.clock.Now().UnixMilli() }
+
+// DB exposes the database. The deliver package composes its own statements —
+// its correctness lives in exact SQL conditions rather than in Go control flow,
+// so those statements belong beside the rules they enforce.
+func (s *Store) DB() *sql.DB { return s.db }
 
 // dsn builds the connection string.
 //
@@ -147,12 +152,11 @@ func applyWAL(ctx context.Context, db *sql.DB) error {
 	}
 }
 
-// exec runs a single write statement, retrying on SQLITE_BUSY.
+// Exec runs a single write statement, retrying on SQLITE_BUSY.
 //
-// A single statement is its own transaction, which is all the prune path needs;
-// the multi-statement BEGIN IMMEDIATE transactions (claim, send) arrive with
-// the code that requires them.
-func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+// A single statement is its own transaction, which is all a conditional CAS
+// needs; multi-statement work goes through WriteTx.
+func (s *Store) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var err error
 	for attempt := 0; ; attempt++ {
 		var res sql.Result
@@ -170,7 +174,7 @@ func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result
 	}
 }
 
-// writeTx runs fn inside a BEGIN IMMEDIATE transaction on one dedicated
+// WriteTx runs fn inside a BEGIN IMMEDIATE transaction on one dedicated
 // connection, retrying the whole transaction on SQLITE_BUSY.
 //
 // IMMEDIATE takes the write lock up front. Every multi-statement write in pager
@@ -182,7 +186,7 @@ func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result
 //
 // The transaction is driven with explicit statements for the same reason
 // migrate is: database/sql cannot express IMMEDIATE.
-func (s *Store) writeTx(ctx context.Context, fn func(context.Context, *sql.Conn) error) error {
+func (s *Store) WriteTx(ctx context.Context, fn func(context.Context, *sql.Conn) error) error {
 	for attempt := 0; ; attempt++ {
 		err := s.writeTxOnce(ctx, fn)
 		if err == nil || !isBusy(err) || attempt >= busyRetries {

@@ -40,9 +40,9 @@ func (s *Store) RecordSession(ctx context.Context, rec SessionRecord) error {
 	if rec.PMRef != "" {
 		pmRef = rec.PMRef
 	}
-	now := s.now()
+	now := s.Now()
 
-	return s.writeTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+	return s.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
 		if rec.HostPid <= 1 {
 			_, err := c.ExecContext(ctx, `
 				INSERT INTO sessions(session_id, tool, root, pm_ref, heartbeat_at)
@@ -103,7 +103,7 @@ func (s *Store) SessionByHost(ctx context.Context, client string, pid int, start
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id FROM sessions
 		 WHERE host_client = ? AND host_pid = ? AND host_start = ? AND heartbeat_at >= ?`,
-		client, pid, start, s.now()-staleAfter.Milliseconds()).Scan(&id)
+		client, pid, start, s.Now()-staleAfter.Milliseconds()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

@@ -50,7 +50,7 @@ const deletable = `
 // PruneNow deletes expired messages unconditionally — the `pager prune` path.
 // With dryRun it only counts, changing nothing.
 func (s *Store) PruneNow(ctx context.Context, retention time.Duration, dryRun bool) (PruneResult, error) {
-	cutoff := s.now() - retention.Milliseconds()
+	cutoff := s.Now() - retention.Milliseconds()
 	if dryRun {
 		var n int64
 		if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM ("+deletable+")", cutoff).Scan(&n); err != nil {
@@ -74,7 +74,7 @@ func (s *Store) PruneOpportunistic(ctx context.Context, retention time.Duration)
 	if err != nil || token == "" {
 		return PruneResult{}, err
 	}
-	n, err := s.deleteExpired(ctx, s.now()-retention.Milliseconds())
+	n, err := s.deleteExpired(ctx, s.Now()-retention.Milliseconds())
 	if err != nil {
 		return PruneResult{Ran: true}, err
 	}
@@ -99,8 +99,8 @@ func (s *Store) acquirePruneGate(ctx context.Context) (string, error) {
 	}
 	token := hex.EncodeToString(buf[:])
 
-	now := s.now()
-	res, err := s.exec(ctx, `
+	now := s.Now()
+	res, err := s.Exec(ctx, `
 		UPDATE meta
 		   SET lease_token = ?, prune_started_at = ?
 		 WHERE key = 'prune'
@@ -126,9 +126,9 @@ func (s *Store) acquirePruneGate(ctx context.Context) (string, error) {
 // runner took over: the first one finishing late must not stamp a completion
 // time over the successor's in-progress state.
 func (s *Store) releasePruneGate(ctx context.Context, token string) (bool, error) {
-	res, err := s.exec(ctx,
+	res, err := s.Exec(ctx,
 		"UPDATE meta SET prune_done_at = ?, lease_token = NULL WHERE key = 'prune' AND lease_token = ?",
-		s.now(), token)
+		s.Now(), token)
 	if err != nil {
 		return false, fmt.Errorf("release prune gate: %w", err)
 	}
@@ -141,7 +141,7 @@ func (s *Store) releasePruneGate(ctx context.Context, token string) (bool, error
 
 // deleteExpired removes at most pruneBatch expired, unreferenced messages.
 func (s *Store) deleteExpired(ctx context.Context, cutoff int64) (int64, error) {
-	res, err := s.exec(ctx,
+	res, err := s.Exec(ctx,
 		"DELETE FROM messages WHERE id IN ("+deletable+" LIMIT ?)", cutoff, pruneBatch)
 	if err != nil {
 		return 0, fmt.Errorf("prune messages: %w", err)
