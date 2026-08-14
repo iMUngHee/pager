@@ -45,20 +45,29 @@ func (e *AmbiguousError) Error() string {
 // targetTiers are tried in order. Exact matches come before fuzzy ones so that
 // a short alias can never be captured by the substring tier just because it is
 // contained in a longer name.
+//
+// namesASession marks the tiers that address a session rather than a name.
+// Since every session now carries an automatic name, a session that is also
+// given one by hand answers those tiers with two rows — and two names for one
+// session is not an ambiguity, because there is no second session a message
+// could go to by mistake. The substring tier is deliberately not one of them:
+// it matches a pattern, so several hits mean the person has to say which name
+// they meant.
 var targetTiers = []struct {
-	name  string
-	query string
+	name          string
+	query         string
+	namesASession bool
 }{
-	{"alias", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`},
-	{"session", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE session_id = ?1`},
+	{"alias", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`, false},
+	{"session", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE session_id = ?1`, true},
 	// pm_ref is "KEY/id", so addressing by the bare id is a suffix match.
 	// substr with a negative offset counts from the end; LIKE is avoided
 	// because the reference itself could contain % or _.
 	{"pm_ref", `SELECT a.alias, COALESCE(a.session_id, '')
 	              FROM aliases a JOIN sessions s ON s.session_id = a.session_id
-	             WHERE s.pm_ref = ?1 OR substr(s.pm_ref, -(length(?1) + 1)) = '/' || ?1`},
+	             WHERE s.pm_ref = ?1 OR substr(s.pm_ref, -(length(?1) + 1)) = '/' || ?1`, true},
 	// instr rather than LIKE, for the same wildcard reason.
-	{"substring", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE instr(alias, ?1) > 0`},
+	{"substring", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE instr(alias, ?1) > 0`, false},
 }
 
 // ResolveTarget maps a sender-supplied reference onto an alias.
@@ -77,11 +86,13 @@ func ResolveTarget(ctx context.Context, st *store.Store, ref string) (Target, er
 		if err != nil {
 			return Target{}, fmt.Errorf("resolve target by %s: %w", tier.name, err)
 		}
-		switch len(found) {
-		case 0:
+		switch {
+		case len(found) == 0:
 			continue
-		case 1:
+		case len(found) == 1:
 			return found[0], nil
+		case tier.namesASession && oneSession(found):
+			return primaryTarget(ctx, st, ref, found[0].SessionID)
 		default:
 			names := make([]string, len(found))
 			for i, t := range found {
@@ -91,6 +102,37 @@ func ResolveTarget(ctx context.Context, st *store.Store, ref string) (Target, er
 		}
 	}
 	return Target{}, fmt.Errorf("%w: %q", ErrNoTarget, ref)
+}
+
+// oneSession reports whether every match belongs to the same, known session.
+//
+// The empty check is what keeps orphans out of it: an alias whose holder is
+// gone carries no session, and two of those are genuinely different inboxes
+// even though their session ids compare equal.
+func oneSession(found []Target) bool {
+	if found[0].SessionID == "" {
+		return false
+	}
+	for _, t := range found[1:] {
+		if t.SessionID != found[0].SessionID {
+			return false
+		}
+	}
+	return true
+}
+
+// primaryTarget resolves a session to the one name it is known by, so that a
+// message addressed to the session is addressed to the same inbox a person
+// would name.
+func primaryTarget(ctx context.Context, st *store.Store, ref, session string) (Target, error) {
+	alias, err := PrimaryAlias(ctx, st, session)
+	if err != nil {
+		return Target{}, err
+	}
+	if alias == "" {
+		return Target{}, fmt.Errorf("%w: %q", ErrNoTarget, ref)
+	}
+	return Target{Alias: alias, SessionID: session}, nil
 }
 
 func matchTargets(ctx context.Context, st *store.Store, query, ref string) ([]Target, error) {
@@ -119,10 +161,26 @@ func matchTargets(ctx context.Context, st *store.Store, query, ref string) ([]Ta
 //
 // Reports false when the alias belongs to someone else or when session does not
 // exist — in both cases nothing was written.
+//
+// The timestamp is not simply the clock. A session is named automatically when
+// it first runs a hook, and the label rule picks a session's most recent name,
+// so a name set here has to outrank the one already there. The clock alone
+// cannot promise that: it has millisecond resolution, and under a test clock
+// that is not advanced the two writes land on the same value, at which point
+// the tie-break falls to alphabetical order and the automatic name wins. Taking
+// the maximum of the clock and one past the session's newest name makes the
+// rule hold regardless of how coarse or frozen the clock is.
+//
+// The subquery correlates on s.session_id, the row the SELECT is building from;
+// excluded.session_id is not available there. The ON CONFLICT predicate is what
+// keeps this from moving an alias another session holds, and must survive any
+// change to the value above it.
 func SetAlias(ctx context.Context, st *store.Store, alias, session string) (bool, error) {
 	res, err := st.Exec(ctx, `
 		INSERT INTO aliases(alias, session_id, root, tool, updated_at)
-		SELECT ?, s.session_id, s.root, s.tool, ?
+		SELECT ?, s.session_id, s.root, s.tool,
+		       max(?, COALESCE((SELECT max(a.updated_at) FROM aliases a
+		                         WHERE a.session_id = s.session_id), 0) + 1)
 		  FROM sessions s WHERE s.session_id = ?
 		ON CONFLICT(alias) DO UPDATE SET updated_at = excluded.updated_at
 		 WHERE aliases.session_id = excluded.session_id`,
@@ -150,23 +208,31 @@ func SetAlias(ctx context.Context, st *store.Store, alias, session string) (bool
 // Any of these evaluated separately would leave a window where the holder sends
 // a heartbeat between the check and the write, and the claim would succeed
 // against a session that is very much alive.
+// The timestamp follows the same rule as SetAlias: a name taken over must
+// outrank the names the claiming session already holds, so that it becomes the
+// one that session is known by. Here the maximum is taken over ?1, the new
+// holder, rather than over aliases.session_id — during this UPDATE that column
+// still names the incumbent being displaced.
 func ClaimAlias(ctx context.Context, st *store.Store, alias, newSession string, staleAfter time.Duration) (bool, error) {
 	cutoff := st.Now() - staleAfter.Milliseconds()
 	res, err := st.Exec(ctx, `
 		UPDATE aliases
-		   SET session_id = ?, lease_generation = lease_generation + 1, updated_at = ?
-		 WHERE alias = ?
+		   SET session_id = ?1,
+		       lease_generation = lease_generation + 1,
+		       updated_at = max(?2, COALESCE((SELECT max(a.updated_at) FROM aliases a
+		                                       WHERE a.session_id = ?1), 0) + 1)
+		 WHERE alias = ?3
 		   -- the claiming session must be live and in this alias's workspace
 		   AND EXISTS (SELECT 1 FROM sessions n
-		                WHERE n.session_id = ?
+		                WHERE n.session_id = ?1
 		                  AND n.root = aliases.root AND n.tool = aliases.tool
-		                  AND n.heartbeat_at >= ?)
+		                  AND n.heartbeat_at >= ?4)
 		   -- the incumbent must be absent or stale
 		   AND (session_id IS NULL
 		        OR NOT EXISTS (SELECT 1 FROM sessions o
 		                        WHERE o.session_id = aliases.session_id
-		                          AND o.heartbeat_at >= ?))`,
-		newSession, st.Now(), strings.TrimSpace(alias), newSession, cutoff, cutoff)
+		                          AND o.heartbeat_at >= ?4))`,
+		newSession, st.Now(), strings.TrimSpace(alias), cutoff)
 	if err != nil {
 		return false, fmt.Errorf("claim alias: %w", err)
 	}

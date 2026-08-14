@@ -32,6 +32,88 @@ func TestSenderLabelNeverBorrowsHuman(t *testing.T) {
 	}
 }
 
+// TestPrimaryAliasPrefersManual fixes the rule that lets an automatic name be
+// an ordinary alias row: a name a person sets is the one the session is known
+// by, however soon after the automatic one it was written.
+//
+// The clock is deliberately left where it starts. Both writes then carry the
+// same millisecond, which is exactly the case that used to fall through to
+// alphabetical order — and "bavu" sorts before "frontend", so the automatic
+// name would win. The generator is injected for the same reason: a random name
+// would pass this test roughly half the time by accident.
+func TestPrimaryAliasPrefersManual(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "s1", workspace, "")
+
+	auto, assigned, err := ensureAutoAlias(ctx, st, "s1", func(int) (string, error) { return "bavu", nil })
+	if err != nil || !assigned {
+		t.Fatalf("ensureAutoAlias: name %q, assigned %v, err %v", auto, assigned, err)
+	}
+	mustSetAlias(t, st, "frontend", "s1")
+
+	primary, err := PrimaryAlias(ctx, st, "s1")
+	if err != nil {
+		t.Fatalf("PrimaryAlias: %v", err)
+	}
+	if primary != "frontend" {
+		t.Errorf("PrimaryAlias = %q, want the manually set %q", primary, "frontend")
+	}
+	label, err := SenderLabel(ctx, st, "s1")
+	if err != nil {
+		t.Fatalf("SenderLabel: %v", err)
+	}
+	if label != "frontend" {
+		t.Errorf("SenderLabel = %q, want the manually set %q", label, "frontend")
+	}
+
+	// Re-running the same alias for its own session stays a successful no-op.
+	mustSetAlias(t, st, "frontend", "s1")
+	if primary, err = PrimaryAlias(ctx, st, "s1"); err != nil || primary != "frontend" {
+		t.Errorf("after a repeat SetAlias: primary = %q, err %v", primary, err)
+	}
+}
+
+// TestRosterNamesAndSkipsStale covers what the roster is for: it answers "who
+// can I page", so a session that stopped heartbeating is not in it, and one
+// that has no name yet is still shown by an address that works.
+func TestRosterNamesAndSkipsStale(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "named", workspace, "")
+	addSession(t, st, "nameless", workspace, "")
+	if _, _, err := ensureAutoAlias(ctx, st, "named", func(int) (string, error) { return "bavu", nil }); err != nil {
+		t.Fatalf("ensureAutoAlias: %v", err)
+	}
+
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "named", workspace, "")
+	addSession(t, st, "nameless", workspace, "")
+	// This one last heartbeat was a day ago and never came back.
+	addSession(t, st, "gone", workspace, "")
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "named", workspace, "")
+	addSession(t, st, "nameless", workspace, "")
+
+	entries, err := Roster(ctx, st, stale)
+	if err != nil {
+		t.Fatalf("Roster: %v", err)
+	}
+	got := map[string]string{}
+	for _, e := range entries {
+		got[e.SessionID] = e.Name
+	}
+	if _, listed := got["gone"]; listed {
+		t.Error("the roster lists a session that stopped heartbeating")
+	}
+	if got["named"] != "bavu" {
+		t.Errorf("named session shows as %q, want %q", got["named"], "bavu")
+	}
+	if got["nameless"] != "nameless" {
+		t.Errorf("a session with no name shows as %q, want its session id", got["nameless"])
+	}
+}
+
 func TestListReportsState(t *testing.T) {
 	st, fake := newStore(t)
 	ctx := t.Context()

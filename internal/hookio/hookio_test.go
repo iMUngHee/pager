@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -94,6 +95,119 @@ func claudePayload(session, prompt string) string {
 func codexPayload(session, prompt string) string {
 	return fmt.Sprintf(`{"session_id":%q,"project_dir":%q,`+
 		`"hook_event_name":"UserPromptSubmit","prompt":%q}`, session, workspace, prompt)
+}
+
+// --- automatic names ---------------------------------------------------
+
+// autoName matches the four-letter consonant-vowel shape the generator emits.
+var autoName = regexp.MustCompile(`\b[bcdfghjklmnprstvwz][aeiou][bcdfghjklmnprstvwz][aeiou]\b`)
+
+// detectionOff pins host detection to "no host".
+//
+// Whether detection succeeds inside a test depends on what the test binary
+// happens to be a descendant of: run from a shell under a coding agent it
+// finds one and records that tool, run from CI it finds nothing. A rule about
+// what happens when the tool is unknown cannot be left to that. An
+// unrecognised PAGER_CLIENT means no host rather than any host, which is the
+// documented way to say "deliberately outside a session".
+func detectionOff(t *testing.T) {
+	t.Helper()
+	t.Setenv("PAGER_CLIENT", "none")
+}
+
+// seedSessionOnly records a session with a known workspace and no alias, the
+// way a successful detection or a pager attach would have left it.
+//
+// Combined with detectionOff this is also the case that decides where
+// eligibility is read from: the incoming hook carries an empty tool, and the
+// session qualifies for a name only because the stored row still knows one.
+func seedSessionOnly(t *testing.T, st *store.Store, session, tool string) {
+	t.Helper()
+	if err := st.RecordSession(t.Context(), store.SessionRecord{
+		ID: session, Tool: tool, Root: workspace,
+	}); err != nil {
+		t.Fatalf("record session: %v", err)
+	}
+}
+
+func primaryAlias(t *testing.T, st *store.Store, session string) string {
+	t.Helper()
+	alias, err := deliver.PrimaryAlias(t.Context(), st, session)
+	if err != nil {
+		t.Fatalf("PrimaryAlias: %v", err)
+	}
+	return alias
+}
+
+// TestHookAssignsName is the fix for what opened this work: a session that
+// never ran `pager alias` was identifiable only by its UUID.
+func TestHookAssignsName(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	got := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("s1", "what's next?")))
+
+	name := primaryAlias(t, st, "s1")
+	if !autoName.MatchString(name) {
+		t.Fatalf("session name = %q, want a four-letter automatic name", name)
+	}
+	if !strings.Contains(got, name) {
+		t.Errorf("the session was not told its own name %q:\n%s", name, got)
+	}
+}
+
+// TestHookAssignsNameAllEvents pins that naming does not depend on
+// SessionStart. The registration matrix calls that event recommended and only
+// UserPromptSubmit required, so a setup without it must still produce names.
+func TestHookAssignsNameAllEvents(t *testing.T) {
+	for _, event := range []string{EventUserPromptSubmit, EventSessionStart, EventStop, EventSubagentStop} {
+		t.Run(event, func(t *testing.T) {
+			detectionOff(t)
+			st := newEnv(t)
+			seedSessionOnly(t, st, "s1", "claude")
+
+			run(t, event, claudePayload("s1", "hello"))
+
+			if name := primaryAlias(t, st, "s1"); !autoName.MatchString(name) {
+				t.Errorf("after a %s hook the session name = %q, want an automatic name", event, name)
+			}
+		})
+	}
+}
+
+// TestHookIntroducesNameAtMostOnce fixes the contract as it actually is: the
+// event that assigns the name says so, and no later event repeats it.
+func TestHookIntroducesNameAtMostOnce(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	first := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("s1", "one")))
+	name := primaryAlias(t, st, "s1")
+	if !strings.Contains(first, name) {
+		t.Fatalf("the assigning hook did not introduce %q:\n%s", name, first)
+	}
+
+	second := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("s1", "two")))
+	if strings.Contains(second, name) {
+		t.Errorf("the name was introduced again on a later hook:\n%s", second)
+	}
+}
+
+// TestHookLeavesUnknownWorkspaceUnnamed is the other half of the rule. An alias
+// copies root and tool when it is created and nothing updates them afterwards,
+// so a session named before its host is known would carry an empty workspace
+// for good — invisible to orphan discovery, untransferable by claim.
+func TestHookLeavesUnknownWorkspaceUnnamed(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+
+	run(t, EventUserPromptSubmit, claudePayload("undetected", "hello"))
+
+	if name := primaryAlias(t, st, "undetected"); name != "" {
+		t.Errorf("session name = %q, want none while the host tool is unknown", name)
+	}
 }
 
 // --- golden inputs -----------------------------------------------------
@@ -391,7 +505,13 @@ func TestSessionStartShowsOrphanHint(t *testing.T) {
 
 // TestRecordsSessionSoItBecomesAddressable: a session nobody has paged yet
 // still has to appear, or it could never be given an alias.
+//
+// Detection is pinned off because every hook run now also tries to name the
+// session, and whether that succeeds otherwise depends on what this test binary
+// happens to be a descendant of. The recording this test is about must not vary
+// with that.
 func TestRecordsSessionSoItBecomesAddressable(t *testing.T) {
+	detectionOff(t)
 	st := newEnv(t)
 	run(t, EventUserPromptSubmit, claudePayload("brand-new", "hi"))
 

@@ -96,6 +96,15 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 		return
 	}
 
+	// Give the session a name if it does not have one. Until it does, anything
+	// it sends is attributed to a session id, which is what a recipient saw
+	// before this existed: a UUID with no way to tell who sent it.
+	//
+	// The error is dropped like every other one here. An unnamed session still
+	// works — it is only harder to talk about — and a hook that fails loudly
+	// costs the session it was meant to serve.
+	name, named, _ := deliver.EnsureAutoAlias(ctx, st, in.SessionID)
+
 	// A user prompt ends whatever exchange preceded it, which is what keeps
 	// ordinary work from accumulating causal depth. See startsNewTurn for what
 	// "a user prompt" is allowed to mean.
@@ -106,6 +115,11 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	}
 
 	text := collect(ctx, st, in.SessionID, rec.Root, rec.Tool, event)
+	// The introduction goes first: it explains the name that the messages
+	// below it are addressed to.
+	if named {
+		text.body = deliver.RenderIntroduction(name) + text.body
+	}
 	if text.body != "" {
 		if err := write(stdout, event, text.body); err != nil {
 			return
