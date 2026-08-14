@@ -134,6 +134,117 @@ func TestResolveTargetAmbiguous(t *testing.T) {
 	}
 }
 
+// TestResolveTargetFoldsOneSession covers the regression automatic names would
+// otherwise cause. Addressing a session by its id or its pm ref answers with
+// every name that session holds, and once it holds two — the automatic one and
+// one a person set — the old rule called that ambiguous and refused to deliver
+// to a session that was never in doubt.
+func TestResolveTargetFoldsOneSession(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "s1", workspace, "CORE/some-item")
+
+	if _, assigned, err := ensureAutoAlias(ctx, st, "s1", func(int) (string, error) { return "bavu", nil }); err != nil || !assigned {
+		t.Fatalf("ensureAutoAlias: assigned %v, err %v", assigned, err)
+	}
+	mustSetAlias(t, st, "frontend", "s1")
+
+	for _, ref := range []string{"s1", "some-item", "CORE/some-item"} {
+		got, err := ResolveTarget(ctx, st, ref)
+		if err != nil {
+			t.Fatalf("ResolveTarget(%q): %v", ref, err)
+		}
+		if got.SessionID != "s1" {
+			t.Errorf("ResolveTarget(%q) session = %q, want %q", ref, got.SessionID, "s1")
+		}
+		if got.Alias != "frontend" {
+			t.Errorf("ResolveTarget(%q) alias = %q, want the name the session is known by", ref, got.Alias)
+		}
+	}
+}
+
+// TestResolveTargetAmbiguousAcrossSessions is the boundary of that fold. Two
+// sessions can carry the same pm ref, and collapsing those to one name would
+// deliver to whichever happened to sort first — a wrong session, silently.
+func TestResolveTargetAmbiguousAcrossSessions(t *testing.T) {
+	st, _ := newStore(t)
+	addSession(t, st, "s1", workspace, "CORE/shared")
+	addSession(t, st, "s2", workspace, "CORE/shared")
+	mustSetAlias(t, st, "one", "s1")
+	mustSetAlias(t, st, "two", "s2")
+
+	_, err := ResolveTarget(t.Context(), st, "shared")
+	var ambiguous *AmbiguousError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("err = %v, want an AmbiguousError", err)
+	}
+	if len(ambiguous.Candidates) != 2 {
+		t.Errorf("candidates = %v, want both sessions' names", ambiguous.Candidates)
+	}
+}
+
+// TestClaimTransfersAutoName: automatic names are never reclaimed by the
+// system, but a person can still take one over. Mail addressed to a session
+// that is gone would otherwise be stranded, since claiming is the only way to
+// reach an inbox whose holder ended.
+func TestClaimTransfersAutoName(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "old", workspace, "")
+	if _, assigned, err := ensureAutoAlias(ctx, st, "old", func(int) (string, error) { return "bavu", nil }); err != nil || !assigned {
+		t.Fatalf("ensureAutoAlias: assigned %v, err %v", assigned, err)
+	}
+	addPending(t, st, "bavu")
+
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "new", workspace, "")
+
+	ok, err := ClaimAlias(ctx, st, "bavu", "new", stale)
+	if err != nil {
+		t.Fatalf("ClaimAlias: %v", err)
+	}
+	if !ok {
+		t.Fatal("an automatic name could not be claimed from a session that is gone")
+	}
+	if holder := aliasHolder(t, st, "bavu"); holder != "new" {
+		t.Errorf("holder = %q, want %q", holder, "new")
+	}
+	if primary, err := PrimaryAlias(ctx, st, "new"); err != nil || primary != "bavu" {
+		t.Errorf("primary alias of the claimant = %q (err %v), want %q", primary, err, "bavu")
+	}
+
+	waiting, _, err := Candidates(ctx, st, "new", DefaultLimits())
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(waiting) != 1 {
+		t.Errorf("the claimant has %d messages waiting, want the 1 left behind", len(waiting))
+	}
+}
+
+// TestPrunePreservesAutoName: names outlive the messages sent to them. Prune
+// deletes messages only, and a name that disappeared with its last message
+// would become free to hand to a different session — the surprise that
+// automatic names are specifically built to avoid.
+func TestPrunePreservesAutoName(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "s1", workspace, "")
+	name, _, err := ensureAutoAlias(ctx, st, "s1", func(int) (string, error) { return "bavu", nil })
+	if err != nil {
+		t.Fatalf("ensureAutoAlias: %v", err)
+	}
+
+	fake.Advance(store.DefaultRetention + time.Hour)
+	if _, err := st.PruneNow(ctx, store.DefaultRetention, false); err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+
+	if holder := aliasHolder(t, st, name); holder != "s1" {
+		t.Errorf("after prune the name %q is held by %q, want %q", name, holder, "s1")
+	}
+}
+
 func TestResolveTargetNoMatch(t *testing.T) {
 	st, _ := newStore(t)
 	if _, err := ResolveTarget(t.Context(), st, "nobody"); !errors.Is(err, ErrNoTarget) {

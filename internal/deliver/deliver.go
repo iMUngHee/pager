@@ -84,6 +84,18 @@ func RenderOrphanHint(orphans []Orphan) string {
 	return sb.String()
 }
 
+// RenderIntroduction tells a session the name it was just given.
+//
+// It is shown on the event that assigned the name and never again, because
+// that is the only moment the session cannot already have seen it. If that one
+// event fails after the name was stored, the introduction is simply lost —
+// nothing is broken by the loss, the session is addressable either way, and
+// keeping state to retry it would cost more than it is worth.
+func RenderIntroduction(name string) string {
+	return fmt.Sprintf("pager: this session is addressable as %q. "+
+		"Another session reaches it with: pager send %s \"...\"\n", name, name)
+}
+
 // selectWithinBudget picks the longest run of candidates that fits both the
 // byte budget and the batch count, truncating each body first.
 //
