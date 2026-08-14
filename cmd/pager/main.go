@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/unghee/pager/internal/clock"
 	"github.com/unghee/pager/internal/deliver"
@@ -38,6 +39,7 @@ var commands = []command{
 	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
 	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
 	{"ls", "[--expired] [--session <id>]", "List messages addressed to this session", list},
+	{"who", "", "List the sessions that can be paged right now", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
@@ -361,10 +363,72 @@ func attach(args []string) error {
 	}
 
 	fmt.Printf("attached %s (%s) at %s\n", rec.ID, rec.Tool, rec.Root)
+
+	// Name it here too. Hooks are the usual path, but setting a session up by
+	// hand is a documented one, and a session that stays nameless is exactly
+	// the situation this avoids — its messages would arrive signed with a UUID.
+	name, _, err := deliver.EnsureAutoAlias(ctx, st, rec.ID)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		fmt.Printf("name:     %s\n", name)
+	}
+
 	if !ref.Host.Valid() {
 		fmt.Println("warning: no host process detected — this session is reachable only via --session or PAGER_SESSION")
 	}
 	return nil
+}
+
+// who lists the sessions that can be paged right now.
+//
+// This is how a person learns the names to address. A session is named without
+// being asked, which is what makes paging possible at all, but a name nobody
+// can see is a name nobody will use.
+func who(args []string) error {
+	fs := flag.NewFlagSet("who", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	entries, err := deliver.Roster(ctx, st, store.DefaultStale)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Println("no sessions are active")
+		return nil
+	}
+
+	now := st.Now()
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tTOOL\tROOT\tLAST")
+	for _, e := range entries {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Tool, e.Root, ago(now, e.LastSeen))
+	}
+	return tw.Flush()
+}
+
+// ago renders a heartbeat's age coarsely. The exact time is not the question a
+// roster answers; "is this session still around" is.
+func ago(now, then int64) string {
+	d := time.Duration(now-then) * time.Millisecond
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
 }
 
 // whoami reports what this invocation resolves to. It prints the detected host
@@ -395,11 +459,25 @@ func whoami(args []string) error {
 	} else {
 		fmt.Println("host:    not detected")
 	}
-	if ref.Attributed() {
-		fmt.Printf("session: %s (via %s)\n", ref.SessionID, ref.Source)
-	} else {
+	if !ref.Attributed() {
 		fmt.Println("session: unattributed — sending needs --session, PAGER_SESSION, or --human")
+		return nil
 	}
+	fmt.Printf("session: %s (via %s)\n", ref.SessionID, ref.Source)
+
+	// The name is printed separately from the session id because it is the
+	// part a person uses, and because its absence is the symptom worth seeing:
+	// a session with no name is one whose hooks have not run, or whose host
+	// was never detected.
+	name, err := deliver.PrimaryAlias(ctx, st, ref.SessionID)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Println("name:    none — it is assigned once a hook runs with the host detected")
+		return nil
+	}
+	fmt.Printf("name:    %s\n", name)
 	return nil
 }
 

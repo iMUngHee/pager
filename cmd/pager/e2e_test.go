@@ -4,8 +4,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/unghee/pager/internal/clock"
+	"github.com/unghee/pager/internal/store"
 )
 
 // These drive the real command dispatch end to end. They are the check that the
@@ -113,6 +118,219 @@ func TestE2ECrossWorkspaceDelivery(t *testing.T) {
 		if len(entries) != 0 {
 			t.Errorf("%s gained %d entries, want none", d, len(entries))
 		}
+	}
+}
+
+// introducedName pulls the name a hook told a session it had been given. The
+// quotes arrive escaped because the line is read out of the JSON envelope the
+// host receives, which is the same text the session itself sees.
+var introducedName = regexp.MustCompile(`addressable as \\?"([a-z]+)`)
+
+func nameFromHook(t *testing.T, out string) string {
+	t.Helper()
+	m := introducedName.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("the hook did not introduce a name:\n%s", out)
+	}
+	return m[1]
+}
+
+// TestE2EAutoNameDelivery is the architectural bet in one test: an automatic
+// name is an ordinary alias row, so everything already built on aliases —
+// addressing, the delivery join, the sender label — works through it with no
+// second code path.
+//
+// Neither session ever runs `pager alias`. That is the situation that opened
+// this work: a live round trip where the recipient saw a raw UUID as the sender
+// and had no way to answer it.
+func TestE2EAutoNameDelivery(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	// Stand outside any host, so nothing here depends on what this test binary
+	// happens to be a descendant of.
+	t.Setenv("PAGER_CLIENT", "none")
+
+	// Record both sessions the way an earlier hook with a working host
+	// detection would have left them: known workspace, no name yet. Going
+	// through `attach` instead would name them itself, and then this test
+	// would no longer be about the hook naming anything.
+	st := openDB(t, filepath.Join(dir, "msg.db"))
+	for _, s := range []struct{ id, tool string }{{"sender-1", "codex"}, {"recv-1", "claude"}} {
+		if err := st.RecordSession(t.Context(), store.SessionRecord{ID: s.id, Tool: s.tool, Root: dir}); err != nil {
+			t.Fatalf("record %s: %v", s.id, err)
+		}
+	}
+
+	hook := func(session string) string {
+		t.Helper()
+		payload := `{"session_id":"` + session + `","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
+		out, err := capture(t, payload, "hook", "UserPromptSubmit")
+		if err != nil {
+			t.Fatalf("hook for %s: %v", session, err)
+		}
+		return out
+	}
+
+	senderName := nameFromHook(t, hook("sender-1"))
+	recvName := nameFromHook(t, hook("recv-1"))
+	if senderName == recvName {
+		t.Fatalf("both sessions were given the same name %q", senderName)
+	}
+
+	sent := mustRun(t, "send", "--session", "sender-1", recvName, "the parser work is yours")
+	if !strings.Contains(sent, recvName) {
+		t.Fatalf("send did not confirm the automatic target:\n%s", sent)
+	}
+
+	delivered := hook("recv-1")
+	if !strings.Contains(delivered, "the parser work is yours") {
+		t.Fatalf("the message did not arrive at the automatic name:\n%s", delivered)
+	}
+	// The symptom this fixes: the recipient sees who sent it.
+	if !strings.Contains(delivered, senderName) {
+		t.Errorf("the sender was not shown as %q:\n%s", senderName, delivered)
+	}
+	if strings.Contains(delivered, "sender-1") {
+		t.Errorf("the recipient was shown the raw session id:\n%s", delivered)
+	}
+}
+
+// reportedName pulls the name out of a command's "name:" line, rather than
+// scanning the whole output for something name-shaped — a temporary directory
+// in the same output could match that by chance.
+var reportedName = regexp.MustCompile(`(?m)^name:\s+([a-z]+)\s*$`)
+
+func nameFromOutput(t *testing.T, out string) string {
+	t.Helper()
+	m := reportedName.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no name was reported:\n%s", out)
+	}
+	return m[1]
+}
+
+// openDB gives a test its own handle on the same database the commands use.
+func openDB(t *testing.T, path string) *store.Store {
+	t.Helper()
+	st, err := store.Open(t.Context(), path, clock.System{})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// TestAttachAssignsName covers the path that has no hooks at all. Setting a
+// session up by hand is documented, and without this it would stay nameless
+// forever — its messages arriving signed with a session id.
+func TestAttachAssignsName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+
+	out := mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
+	name := nameFromOutput(t, out)
+
+	// The name is real: it addresses the session.
+	if sent := mustRun(t, "send", "--human", name, "hello"); !strings.Contains(sent, name) {
+		t.Errorf("the name attach reported does not address the session:\n%s", sent)
+	}
+}
+
+func TestWhoamiShowsName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+
+	attached := mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
+	name := nameFromOutput(t, attached)
+
+	out := mustRun(t, "whoami", "--session", "s1")
+	if !strings.Contains(out, "name:") {
+		t.Errorf("whoami has no name line:\n%s", out)
+	}
+	if !strings.Contains(out, name) {
+		t.Errorf("whoami does not show the session's name %q:\n%s", name, out)
+	}
+}
+
+// TestWhoListsFreshNamedSessions: the roster answers "who can I page", so a
+// session whose hooks stopped running hours ago has no business in it.
+func TestWhoListsFreshNamedSessions(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_CLIENT", "none")
+
+	fresh := nameFromOutput(t, mustRun(t, "attach", "--session", "fresh", "--tool", "claude", "--root", dir))
+	gone := nameFromOutput(t, mustRun(t, "attach", "--session", "gone", "--tool", "codex", "--root", dir))
+	if fresh == gone {
+		t.Fatalf("both sessions were named %q", fresh)
+	}
+
+	// Age one session out. The commands run on the real clock, so staleness
+	// has to be written rather than waited for.
+	st := openDB(t, dbPath)
+	if _, err := st.DB().ExecContext(t.Context(),
+		"UPDATE sessions SET heartbeat_at = ? WHERE session_id = ?",
+		st.Now()-(store.DefaultStale+time.Hour).Milliseconds(), "gone"); err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+
+	out := mustRun(t, "who")
+	if !strings.Contains(out, fresh) {
+		t.Errorf("the roster is missing the live session %q:\n%s", fresh, out)
+	}
+	if strings.Contains(out, gone) {
+		t.Errorf("the roster still lists the stale session %q:\n%s", gone, out)
+	}
+	if !strings.Contains(out, "claude") || !strings.Contains(out, dir) {
+		t.Errorf("the roster does not say where the session is:\n%s", out)
+	}
+}
+
+func TestAgoRendersCoarsely(t *testing.T) {
+	const now = int64(1_000_000_000)
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want string
+	}{
+		{"seconds", 30 * time.Second, "just now"},
+		{"minutes", 5 * time.Minute, "5m ago"},
+		{"hours", 3 * time.Hour, "3h ago"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ago(now, now-tc.age.Milliseconds()); got != tc.want {
+				t.Errorf("ago(%s) = %q, want %q", tc.age, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSchemaVersionUnchanged: automatic names were designed to need no schema
+// change, so a database written by the previous version keeps working and this
+// one must not quietly migrate it.
+func TestSchemaVersionUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_CLIENT", "none")
+
+	mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
+	payload := `{"session_id":"s1","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
+	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	mustRun(t, "who")
+
+	st := openDB(t, dbPath)
+	var version int
+	if err := st.DB().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("user_version = %d, want the unchanged 1", version)
 	}
 }
 
