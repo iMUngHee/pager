@@ -40,6 +40,11 @@ const busyRetries = 3
 type Store struct {
 	db    *sql.DB
 	clock clock.Clock
+	// path is the database this store actually opened. The archive lives beside
+	// it, so isolating a test or a second set of sessions with PAGER_DB has to
+	// isolate the archive too — reading the environment again at archive time
+	// would not see the path this store was handed.
+	path string
 }
 
 // DefaultPath returns the database location: PAGER_DB when set, otherwise
@@ -93,7 +98,7 @@ func Open(ctx context.Context, path string, c clock.Clock) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db, clock: c}, nil
+	return &Store{db: db, clock: c, path: path}, nil
 }
 
 // Close releases the database handle.

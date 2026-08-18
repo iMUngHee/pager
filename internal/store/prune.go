@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -139,10 +141,63 @@ func (s *Store) releasePruneGate(ctx context.Context, token string) (bool, error
 	return n > 0, nil
 }
 
-// deleteExpired removes at most pruneBatch expired, unreferenced messages.
+// deleteExpired archives at most pruneBatch expired, unreferenced messages and
+// then removes them.
+//
+// The archive write happens outside any transaction, on purpose. Holding the
+// SQLite write lock across an fsync would block every concurrent hook for up to
+// the entire 5s budget one gets — busy_timeout is 5s too — and a hook deadline
+// expiring mid-write could not roll a file back anyway.
+//
+// What makes that safe is the shape of the DELETE rather than a transaction: it
+// names the ids that were just archived, so nothing outside the archived set
+// can be removed, and it re-applies the deletable predicate, so a row that
+// gained a reference since the read is skipped instead of failing the whole
+// statement on its foreign key. A row archived but not deleted is simply
+// archived again next pass — see the at-least-once contract in the plan.
+//
+// When archiving is switched off the guarantee is explicitly given up and the
+// delete proceeds exactly as it did before.
 func (s *Store) deleteExpired(ctx context.Context, cutoff int64) (int64, error) {
+	recs, err := s.selectDeletable(ctx, cutoff, pruneBatch)
+	if err != nil || len(recs) == 0 {
+		return 0, err
+	}
+	if archiveEnabled() {
+		if err := appendArchive(archivePath(s.path), recs); err != nil {
+			return 0, err
+		}
+	}
+	return s.deleteArchived(ctx, recs, cutoff)
+}
+
+// selectDeletable reads the next batch of prune candidates in full, because
+// they have to be archived before they can be deleted.
+func (s *Store) selectDeletable(ctx context.Context, cutoff int64, limit int) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT "+recordColumns+" FROM messages WHERE id IN ("+deletable+" LIMIT ?)", cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select prunable: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	if err := eachRecord(rows, func(r Record) error {
+		out = append(out, r)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("select prunable: %w", err)
+	}
+	return out, nil
+}
+
+// deleteArchived removes exactly those of recs that are still deletable.
+//
+// One statement, so it is its own transaction and Exec's SQLITE_BUSY retry
+// applies unchanged — there is no file write inside it to repeat.
+func (s *Store) deleteArchived(ctx context.Context, recs []Record, cutoff int64) (int64, error) {
 	res, err := s.Exec(ctx,
-		"DELETE FROM messages WHERE id IN ("+deletable+" LIMIT ?)", cutoff, pruneBatch)
+		"DELETE FROM messages WHERE id IN ("+idList(recs)+") AND id IN ("+deletable+")", cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("prune messages: %w", err)
 	}
@@ -151,4 +206,20 @@ func (s *Store) deleteExpired(ctx context.Context, cutoff int64) (int64, error) 
 		return 0, fmt.Errorf("prune messages: %w", err)
 	}
 	return n, nil
+}
+
+// idList renders record ids as a SQL list.
+//
+// These integers came out of the database moments ago, so there is nothing to
+// inject; writing them literally also keeps a full batch clear of the bound
+// parameter ceiling older SQLite builds impose.
+func idList(recs []Record) string {
+	var sb strings.Builder
+	for i, r := range recs {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strconv.FormatInt(r.ID, 10))
+	}
+	return sb.String()
 }

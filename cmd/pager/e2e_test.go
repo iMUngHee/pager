@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -417,6 +418,113 @@ func TestE2EListAndPrune(t *testing.T) {
 	}
 	if out := mustRun(t, "prune", "--dry-run"); !strings.Contains(out, "0 message(s) would be deleted") {
 		t.Errorf("dry-run prune: %s", out)
+	}
+}
+
+// TestE2EExportRoundTrip drives the command a person actually types and checks
+// what lands on stdout is JSONL carrying the message they sent.
+func TestE2EExportRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+
+	mustRun(t, "attach", "--session", "e", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "e", "e-box")
+	mustRun(t, "send", "--human", "e-box", "keep me")
+
+	out := mustRun(t, "export")
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("export wrote %d lines, want 1:\n%s", len(lines), out)
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("export line is not valid JSON: %v\n%s", err, lines[0])
+	}
+	if rec["body"] != "keep me" {
+		t.Errorf("exported body is %v, want %q", rec["body"], "keep me")
+	}
+	if rec["alias"] != "e-box" {
+		t.Errorf("exported alias is %v, want %q", rec["alias"], "e-box")
+	}
+	// --human is a claim about who wrote the message, not a claim that no
+	// session was resolvable — the sending session is still recorded when there
+	// is one. What the origin does determine is the causal chain: a human send
+	// starts one, so it has no cause.
+	if rec["origin"] != "human" {
+		t.Errorf("exported origin is %v, want %q", rec["origin"], "human")
+	}
+	if v, ok := rec["cause_id"]; !ok || v != nil {
+		t.Errorf("exported cause_id is %v (present: %v), want an explicit null", v, ok)
+	}
+}
+
+// TestE2EPruneArchivesThroughTheBinary drives a real, non-dry-run prune through
+// command dispatch and checks the file actually lands beside the database.
+//
+// Every other archive test holds a *store.Store directly. This one goes through
+// openStore and store.DefaultPath instead, which is the plumbing that decides
+// where the archive ends up — a mistake there would be invisible to all of them,
+// and the surrounding prune e2e only ever runs --dry-run against a message that
+// is not expired, so it never reaches the archive code at all.
+func TestE2EPruneArchivesThroughTheBinary(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_ARCHIVE", "")
+
+	mustRun(t, "attach", "--session", "p", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "p", "p-box")
+	mustRun(t, "send", "--human", "p-box", "archive me")
+
+	// Age the message past retention. Retention is a constant with no override,
+	// so the only way to make a real prune delete anything is to move the row.
+	st, err := store.Open(t.Context(), dbPath, clock.System{})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	old := st.Now() - (store.DefaultRetention + time.Hour).Milliseconds()
+	if _, err := st.DB().ExecContext(t.Context(),
+		"UPDATE messages SET created_at = ?, delivered_at = ?", old, old); err != nil {
+		t.Fatalf("age message: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if out := mustRun(t, "prune"); !strings.Contains(out, "1 message(s) deleted") {
+		t.Fatalf("prune did not delete the expired message: %s", out)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "archive.jsonl"))
+	if err != nil {
+		t.Fatalf("archive was not written beside the database: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSuffix(string(data), "\n")), &rec); err != nil {
+		t.Fatalf("archived line is not valid JSON: %v\n%s", err, data)
+	}
+	if rec["body"] != "archive me" {
+		t.Errorf("archived body is %v, want %q", rec["body"], "archive me")
+	}
+
+	if out := mustRun(t, "export"); out != "" {
+		t.Errorf("export still returns rows after the prune:\n%s", out)
+	}
+}
+
+// TestE2EExportRejectsArguments: a flag that silently did nothing would be
+// worse than no flag at all, because the output would look filtered.
+func TestE2EExportRejectsArguments(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+
+	out, err := capture(t, "", "export", "--since", "3d")
+	if err == nil {
+		t.Errorf("export accepted an unknown argument and wrote:\n%s", out)
+	}
+	if out != "" {
+		t.Errorf("export wrote output despite failing:\n%s", out)
 	}
 }
 
