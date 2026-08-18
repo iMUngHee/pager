@@ -11,6 +11,12 @@ SHELL  := /bin/bash
 BINDIR ?= $(HOME)/.local/bin
 BIN    := $(BINDIR)/pager
 
+# How many previous binaries to keep. More than one because a hook that fails is
+# silent: a regression can survive a day unnoticed, and with a single generation
+# the next reinstall would overwrite the last good binary with the broken one,
+# leaving rollback to restore broken over broken.
+BACKUPS ?= 3
+
 export CGO_ENABLED := 0
 
 .PHONY: help build reinstall rollback smoke test vet fmt check clean
@@ -48,23 +54,33 @@ build: ## Build pager into ~/.local/bin (replace-while-running safe)
 	@echo "✓ installed $(BIN)"
 
 # Upgrading in place is the normal case: hooks in live sessions are already
-# calling $(BIN), so the swap has to be atomic and the old binary has to stay
+# calling $(BIN), so the swap has to be atomic and the old binaries have to stay
 # reachable. A hook that fails is silent by design, which is exactly why
 # rolling back cannot depend on rebuilding an older checkout first.
-reinstall: test ## Reinstall over a running install, keeping the previous binary
+#
+# Backups are named by the moment they were taken so that the order to walk back
+# through is written in the filenames rather than inferred from mtimes, which
+# `cp -p` deliberately carries over from the binary being replaced.
+reinstall: test ## Reinstall over a running install, keeping the last $(BACKUPS) binaries
 	@mkdir -p "$(BINDIR)"
 	go build -o "$(BIN).new" ./cmd/pager
 	@$(MAKE) --no-print-directory smoke CAND="$(BIN).new"
-	@if [ -x "$(BIN)" ]; then cp -p "$(BIN)" "$(BIN).prev"; fi
+	@if [ -x "$(BIN)" ]; then cp -p "$(BIN)" "$(BIN).prev.$$(date +%Y%m%d-%H%M%S)"; fi
 	@mv "$(BIN).new" "$(BIN)"
+	@ls "$(BIN)".prev.* 2>/dev/null | sort -r | tail -n +$$(( $(BACKUPS) + 1 )) | \
+		while read -r stale; do rm -f "$$stale"; done
 	@echo "✓ reinstalled $(BIN)"
-	@echo "  previous binary kept at $(BIN).prev — restore it with: make rollback"
+	@echo "  $$(ls "$(BIN)".prev.* 2>/dev/null | wc -l | tr -d ' ') previous binaries kept — restore the newest with: make rollback"
 	@"$(BIN)" whoami || true
 
-rollback: ## Restore the binary kept by the last reinstall
-	@test -x "$(BIN).prev" || { echo "no $(BIN).prev to restore"; exit 1; }
-	@mv "$(BIN).prev" "$(BIN)"
-	@echo "✓ restored $(BIN) from .prev"
+# Each rollback consumes the backup it restores, so running it again steps
+# further back instead of restoring the same binary forever.
+rollback: ## Restore the most recent binary kept by a reinstall
+	@latest=$$(ls "$(BIN)".prev.* 2>/dev/null | sort -r | head -1); \
+	 test -n "$$latest" || { echo "no backup to restore: nothing matches $(BIN).prev.*" >&2; exit 1; }; \
+	 mv "$$latest" "$(BIN)"; \
+	 echo "✓ restored $(BIN) from $${latest##*/}"; \
+	 echo "  $$(ls "$(BIN)".prev.* 2>/dev/null | wc -l | tr -d ' ') older backups left"
 	@$(MAKE) --no-print-directory smoke CAND="$(BIN)"
 
 test: ## Run all tests with the race detector
