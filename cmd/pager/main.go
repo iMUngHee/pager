@@ -41,6 +41,7 @@ var commands = []command{
 	{"ls", "[--expired] [--session <id>]", "List messages addressed to this session", list},
 	{"who", "", "List the sessions that can be paged right now", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
+	{"export", "", "Write every stored message to stdout as JSONL", export},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", serveMCP},
@@ -254,6 +255,36 @@ func firstLine(body string) string {
 		return line + " …"
 	}
 	return line
+}
+
+// export writes the whole database to stdout as JSONL.
+//
+// It takes no flags on purpose. Prune's archive uses the same record shape, so
+// filtering is jq's job and saving is the shell's:
+//
+//	pager export > backup.jsonl
+//	pager export | jq 'select(.alias == "gupa")'
+//	cat ~/.pager/archive.jsonl <(pager export) | awk '!seen[$0]++'
+//
+// Nor is there a session to resolve: this dumps one local user's database
+// whole, so there is nobody to attribute the call to.
+//
+// Unknown arguments are refused rather than ignored. Quietly dumping everything
+// in response to `pager export --since 3d` would look like the flag worked.
+func export(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("export takes no arguments (got %q) — filter the output with jq instead", args[0])
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	_, err = st.ExportAll(ctx, os.Stdout)
+	return err
 }
 
 // prune deletes messages past the retention window.
