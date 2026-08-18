@@ -367,11 +367,18 @@ func attach(args []string) error {
 	// Name it here too. Hooks are the usual path, but setting a session up by
 	// hand is a documented one, and a session that stays nameless is exactly
 	// the situation this avoids — its messages would arrive signed with a UUID.
+	//
+	// Failing to name it does not fail the command, on the same judgement that
+	// makes hookio drop this error: an unnamed session still works, it is only
+	// harder to talk about. By this point RecordSession has already succeeded,
+	// so returning here would report a completed attach as a failure — and it
+	// would swallow the host warning below, which is the more actionable of the
+	// two things that can be wrong.
 	name, _, err := deliver.EnsureAutoAlias(ctx, st, rec.ID)
-	if err != nil {
-		return err
-	}
-	if name != "" {
+	switch {
+	case err != nil:
+		fmt.Printf("warning: this session has no name yet: %v\n", err)
+	case name != "":
 		fmt.Printf("name:     %s\n", name)
 	}
 
