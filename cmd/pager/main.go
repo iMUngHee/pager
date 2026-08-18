@@ -112,7 +112,7 @@ func send(args []string) error {
 		return deliver.ErrUnattributed
 	}
 
-	found, err := deliver.ResolveTarget(ctx, st, target)
+	found, err := deliver.ResolveTarget(ctx, st, target, store.DefaultStale)
 	if err != nil {
 		return err
 	}

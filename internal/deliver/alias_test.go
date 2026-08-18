@@ -89,7 +89,7 @@ func TestResolveTargetTierOrder(t *testing.T) {
 		{"unique substring", "review", "review-queue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ResolveTarget(ctx, st, tc.ref)
+			got, err := ResolveTarget(ctx, st, tc.ref, stale)
 			if err != nil {
 				t.Fatalf("ResolveTarget(%q): %v", tc.ref, err)
 			}
@@ -109,7 +109,7 @@ func TestResolveTargetExactBeatsSubstring(t *testing.T) {
 	mustSetAlias(t, st, "in", "s1")
 	mustSetAlias(t, st, "inbox", "s1")
 
-	got, err := ResolveTarget(t.Context(), st, "in")
+	got, err := ResolveTarget(t.Context(), st, "in", stale)
 	if err != nil {
 		t.Fatalf("ResolveTarget: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestResolveTargetAmbiguous(t *testing.T) {
 	mustSetAlias(t, st, "review-a", "s1")
 	mustSetAlias(t, st, "review-b", "s1")
 
-	_, err := ResolveTarget(t.Context(), st, "review")
+	_, err := ResolveTarget(t.Context(), st, "review", stale)
 	var ambiguous *AmbiguousError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("err = %v, want an AmbiguousError", err)
@@ -150,7 +150,7 @@ func TestResolveTargetFoldsOneSession(t *testing.T) {
 	mustSetAlias(t, st, "frontend", "s1")
 
 	for _, ref := range []string{"s1", "some-item", "CORE/some-item"} {
-		got, err := ResolveTarget(ctx, st, ref)
+		got, err := ResolveTarget(ctx, st, ref, stale)
 		if err != nil {
 			t.Fatalf("ResolveTarget(%q): %v", ref, err)
 		}
@@ -173,13 +173,117 @@ func TestResolveTargetAmbiguousAcrossSessions(t *testing.T) {
 	mustSetAlias(t, st, "one", "s1")
 	mustSetAlias(t, st, "two", "s2")
 
-	_, err := ResolveTarget(t.Context(), st, "shared")
+	_, err := ResolveTarget(t.Context(), st, "shared", stale)
 	var ambiguous *AmbiguousError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("err = %v, want an AmbiguousError", err)
 	}
 	if len(ambiguous.Candidates) != 2 {
 		t.Errorf("candidates = %v, want both sessions' names", ambiguous.Candidates)
+	}
+}
+
+// TestResolveTargetSkipsDeadOnSubstring is the reason the live tier exists.
+// Names are never reclaimed, so every session that ever ran leaves one behind,
+// and without this the set a person picks from — what the roster shows — drifts
+// away from the set a short reference is resolved against. An abbreviation that
+// was unique when it was learned would start colliding with the name of a
+// session that ended weeks ago.
+func TestResolveTargetSkipsDeadOnSubstring(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+
+	addSession(t, st, "departed", workspace, "")
+	mustSetAlias(t, st, "fide", "departed")
+
+	// Long enough that "departed" stops counting as reachable.
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "here", workspace, "")
+	mustSetAlias(t, st, "config", "here")
+
+	got, err := ResolveTarget(ctx, st, "fi", stale)
+	if err != nil {
+		t.Fatalf(`ResolveTarget("fi"): %v`, err)
+	}
+	if got.Alias != "config" {
+		t.Errorf("alias = %q, want the live %q — the dead name must not compete", got.Alias, "config")
+	}
+}
+
+// TestResolveTargetAmbiguousAmongLive fixes the boundary of that skip. Two live
+// names matching one reference is a real question for the person to answer, and
+// the candidate list is the answer they act on — so a name nobody is behind has
+// no business being in it.
+func TestResolveTargetAmbiguousAmongLive(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+
+	addSession(t, st, "departed", workspace, "")
+	mustSetAlias(t, st, "review-old", "departed")
+
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "s1", workspace, "")
+	addSession(t, st, "s2", workspace, "")
+	mustSetAlias(t, st, "review-a", "s1")
+	mustSetAlias(t, st, "review-b", "s2")
+
+	_, err := ResolveTarget(ctx, st, "review", stale)
+	var ambiguous *AmbiguousError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("err = %v, want an AmbiguousError", err)
+	}
+	for _, name := range ambiguous.Candidates {
+		if name == "review-old" {
+			t.Errorf("candidates = %v, want no name whose session is gone", ambiguous.Candidates)
+		}
+	}
+	if len(ambiguous.Candidates) != 2 {
+		t.Errorf("candidates = %v, want exactly the two live names", ambiguous.Candidates)
+	}
+}
+
+// TestResolveTargetFallsBackToDead keeps the wider tier meaningful. Mail left
+// for a name whose session ended is how a takeover starts — the message waits
+// until someone claims the alias — so narrowing the search must not make those
+// names unreachable, only outrankable.
+func TestResolveTargetFallsBackToDead(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+
+	addSession(t, st, "departed", workspace, "")
+	mustSetAlias(t, st, "fide", "departed")
+	fake.Advance(stale + time.Hour)
+
+	got, err := ResolveTarget(ctx, st, "fid", stale)
+	if err != nil {
+		t.Fatalf(`ResolveTarget("fid"): %v`, err)
+	}
+	if got.Alias != "fide" {
+		t.Errorf("alias = %q, want %q — with no live match the wider tier still answers", got.Alias, "fide")
+	}
+}
+
+// TestResolveTargetExactReachesDead states the limit of the whole change: it
+// touches how patterns are matched, never how a name is. Addressing a departed
+// session by the name it was given is exactly what the orphan hint tells a
+// person to do.
+func TestResolveTargetExactReachesDead(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+
+	addSession(t, st, "departed", workspace, "")
+	mustSetAlias(t, st, "fide", "departed")
+
+	fake.Advance(stale + time.Hour)
+	addSession(t, st, "here", workspace, "")
+	mustSetAlias(t, st, "config", "here")
+
+	got, err := ResolveTarget(ctx, st, "fide", stale)
+	if err != nil {
+		t.Fatalf(`ResolveTarget("fide"): %v`, err)
+	}
+	if got.Alias != "fide" {
+		t.Errorf("alias = %q, want the exact %q", got.Alias, "fide")
 	}
 }
 
@@ -247,7 +351,7 @@ func TestPrunePreservesAutoName(t *testing.T) {
 
 func TestResolveTargetNoMatch(t *testing.T) {
 	st, _ := newStore(t)
-	if _, err := ResolveTarget(t.Context(), st, "nobody"); !errors.Is(err, ErrNoTarget) {
+	if _, err := ResolveTarget(t.Context(), st, "nobody", stale); !errors.Is(err, ErrNoTarget) {
 		t.Errorf("err = %v, want ErrNoTarget", err)
 	}
 }

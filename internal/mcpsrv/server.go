@@ -114,7 +114,7 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	found, err := deliver.ResolveTarget(ctx, s.st, target)
+	found, err := deliver.ResolveTarget(ctx, s.st, target, store.DefaultStale)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

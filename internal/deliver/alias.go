@@ -50,39 +50,71 @@ func (e *AmbiguousError) Error() string {
 // Since every session now carries an automatic name, a session that is also
 // given one by hand answers those tiers with two rows — and two names for one
 // session is not an ambiguity, because there is no second session a message
-// could go to by mistake. The substring tier is deliberately not one of them:
-// it matches a pattern, so several hits mean the person has to say which name
+// could go to by mistake. The substring tiers are deliberately not among them:
+// they match a pattern, so several hits mean the person has to say which name
 // they meant.
+//
+// livesOnly marks the tier that binds the staleness cutoff as ?2 and so sees
+// only the names a live session answers to. It exists because names are never
+// reclaimed: a name outlives the session that held it, and every session that
+// ever ran leaves one behind. Without this tier the set a person picks from —
+// what `pager who` lists — keeps shrinking away from the set a reference is
+// resolved against, and abbreviations that were unique when they were learned
+// start colliding with the names of sessions that ended long ago.
+//
+// The wider substring tier still follows it, so a name whose session is gone
+// remains addressable; it just no longer competes with one that is not.
 var targetTiers = []struct {
 	name          string
 	query         string
 	namesASession bool
+	livesOnly     bool
 }{
-	{"alias", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`, false},
-	{"session", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE session_id = ?1`, true},
+	{"alias", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`, false, false},
+	{"session", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE session_id = ?1`, true, false},
 	// pm_ref is "KEY/id", so addressing by the bare id is a suffix match.
 	// substr with a negative offset counts from the end; LIKE is avoided
 	// because the reference itself could contain % or _.
 	{"pm_ref", `SELECT a.alias, COALESCE(a.session_id, '')
 	              FROM aliases a JOIN sessions s ON s.session_id = a.session_id
-	             WHERE s.pm_ref = ?1 OR substr(s.pm_ref, -(length(?1) + 1)) = '/' || ?1`, true},
+	             WHERE s.pm_ref = ?1 OR substr(s.pm_ref, -(length(?1) + 1)) = '/' || ?1`, true, false},
 	// instr rather than LIKE, for the same wildcard reason.
-	{"substring", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE instr(alias, ?1) > 0`, false},
+	{"live substring", `SELECT a.alias, COALESCE(a.session_id, '')
+	                      FROM aliases a
+	                     WHERE instr(a.alias, ?1) > 0
+	                       AND EXISTS (SELECT 1 FROM sessions s
+	                                    WHERE s.session_id = a.session_id
+	                                      AND s.heartbeat_at >= ?2)`, false, true},
+	{"substring", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE instr(alias, ?1) > 0`, false, false},
 }
 
 // ResolveTarget maps a sender-supplied reference onto an alias.
 //
 // A tier that matches several aliases fails rather than falling through to the
 // next one: several matches means the reference is genuinely ambiguous at that
-// level of precision, and continuing would answer a less precise question.
-func ResolveTarget(ctx context.Context, st *store.Store, ref string) (Target, error) {
+// level of precision, and continuing would answer a less precise question. That
+// is also why the live substring tier does not fall through when it finds
+// several — names that live sessions answer to are the ones a person is
+// choosing between, and widening the search would only add names to the list
+// that nobody is waiting behind.
+//
+// staleAfter is how long a session may go without a hook event before its names
+// stop competing for a short reference. It is passed in rather than read from a
+// package constant so that this matches ClaimAlias, OrphanAliases and Roster,
+// which all take the same threshold from their caller.
+func ResolveTarget(ctx context.Context, st *store.Store, ref string, staleAfter time.Duration) (Target, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return Target{}, errors.New("empty target reference")
 	}
+	cutoff := st.Now() - staleAfter.Milliseconds()
 
 	for _, tier := range targetTiers {
-		found, err := matchTargets(ctx, st, tier.query, ref)
+		args := []any{ref}
+		if tier.livesOnly {
+			args = append(args, cutoff)
+		}
+		found, err := matchTargets(ctx, st, tier.query, args...)
 		if err != nil {
 			return Target{}, fmt.Errorf("resolve target by %s: %w", tier.name, err)
 		}
@@ -135,8 +167,11 @@ func primaryTarget(ctx context.Context, st *store.Store, ref, session string) (T
 	return Target{Alias: alias, SessionID: session}, nil
 }
 
-func matchTargets(ctx context.Context, st *store.Store, query, ref string) ([]Target, error) {
-	rows, err := st.DB().QueryContext(ctx, query, ref)
+// matchTargets runs one tier's query. The bindings are variadic because only
+// the live tier needs a second one; passing a cutoff the other queries never
+// mention would hand SQLite more parameters than the statement declares.
+func matchTargets(ctx context.Context, st *store.Store, query string, args ...any) ([]Target, error) {
+	rows, err := st.DB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
