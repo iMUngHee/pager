@@ -182,6 +182,52 @@ func TestAutoNameEscalatesAfterEight(t *testing.T) {
 	}
 }
 
+// TestAutoNameGivesUpAfterEveryAttempt covers the one path that returns an
+// error, which nothing else reaches: every candidate is taken, including the
+// three-syllable ones. Callers differ on what to do about it — hookio drops it
+// so a hook stays silent, attach prints it and carries on — and both of those
+// choices only make sense if this path is known to be reachable at all.
+//
+// The generator offers the same taken name every time. That is the shape of
+// exhaustion the loop actually has to survive: the insert loses to the unique
+// constraint, the re-read finds the session still unnamed, and the attempt is
+// spent.
+func TestAutoNameGivesUpAfterEveryAttempt(t *testing.T) {
+	st, _ := newStore(t)
+	addSession(t, st, "s1", workspace, "")
+	addSession(t, st, "holder", workspace, "")
+	mustSetAlias(t, st, "bavu", "holder")
+
+	var asked []int
+	gen := func(syllables int) (string, error) {
+		asked = append(asked, syllables)
+		return "bavu", nil
+	}
+
+	name, assigned, err := ensureAutoAlias(t.Context(), st, "s1", gen)
+	if err == nil {
+		t.Fatalf("ensureAutoAlias succeeded with name %q, want the exhaustion error", name)
+	}
+	if name != "" || assigned {
+		t.Errorf("name = %q (assigned %v), want neither when every attempt is spent", name, assigned)
+	}
+	if len(asked) != autoAttempts {
+		t.Fatalf("generator was asked %d times, want all %d attempts", len(asked), autoAttempts)
+	}
+	for i, syllables := range asked {
+		want := autoShortSyllables
+		if i >= autoShortAttempts {
+			want = autoLongSyllables
+		}
+		if syllables != want {
+			t.Errorf("attempt %d asked for %d syllables, want %d", i+1, syllables, want)
+		}
+	}
+	if n := aliasCount(t, st, "s1"); n != 0 {
+		t.Errorf("alias rows = %d, want 0 — giving up must not leave a partial name", n)
+	}
+}
+
 // TestNoNameWithoutTool and TestNoNameWithoutRoot cover the same rule from both
 // sides: an alias copies root and tool at insertion and nothing updates them
 // afterwards, so naming a session before its workspace is known would freeze a
