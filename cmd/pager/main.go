@@ -86,7 +86,7 @@ func send(args []string) error {
 	session := fs.String("session", "", "sending session id")
 	human := fs.Bool("human", false, "assert this send is operator-initiated, not agent-initiated")
 	label := fs.String("label", "", "how the recipient sees the sender")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 {
@@ -139,7 +139,7 @@ func send(args []string) error {
 func alias(args []string) error {
 	fs := flag.NewFlagSet("alias", flag.ContinueOnError)
 	session := fs.String("session", "", "session id to name")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -172,7 +172,7 @@ func alias(args []string) error {
 func claim(args []string) error {
 	fs := flag.NewFlagSet("claim", flag.ContinueOnError)
 	session := fs.String("session", "", "session id taking over")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -206,7 +206,7 @@ func list(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	session := fs.String("session", "", "session id to list for")
 	expired := fs.Bool("expired", false, "show only messages past the automatic delivery window")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 
@@ -291,7 +291,7 @@ func export(args []string) error {
 func prune(args []string) error {
 	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "report what would be deleted, delete nothing")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 
@@ -353,7 +353,7 @@ func attach(args []string) error {
 	tool := fs.String("tool", "", "host tool: claude or codex (default: the detected host)")
 	root := fs.String("root", "", "workspace root (default: the working directory)")
 	pmRef := fs.String("pm-ref", "", "optional KEY/id to address this session by")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 
@@ -426,7 +426,7 @@ func attach(args []string) error {
 // can see is a name nobody will use.
 func who(args []string) error {
 	fs := flag.NewFlagSet("who", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 
@@ -476,7 +476,7 @@ func ago(now, then int64) string {
 func whoami(args []string) error {
 	fs := flag.NewFlagSet("whoami", flag.ContinueOnError)
 	session := fs.String("session", "", "session id to attribute this invocation to")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
 

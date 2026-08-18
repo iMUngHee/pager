@@ -359,6 +359,91 @@ func TestE2EReplyCarriesCausalDepth(t *testing.T) {
 	}
 }
 
+// TestE2ETrailingHumanFlag is the invocation the usage string has always
+// advertised. Writing --human last used to leave it unparsed: it was joined
+// into the body the recipient reads, and the send it was meant to mark as an
+// operator's was recorded as ordinary caused traffic — charged to the automatic
+// budget and carrying causal depth it should have broken.
+//
+// The sending session has to be holding a delivered message for this to bite.
+// Without one, a send is treated as human-origin anyway and the lost flag
+// changes nothing but the body.
+func TestE2ETrailingHumanFlag(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+
+	mustRun(t, "attach", "--session", "a", "--tool", "codex", "--root", dir)
+	mustRun(t, "alias", "--session", "a", "a-box")
+	mustRun(t, "attach", "--session", "b", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "b", "b-box")
+
+	mustRun(t, "send", "--session", "a", "b-box", "look at this")
+	payload := `{"session_id":"b","cwd":"` + dir + `","hook_event_name":"Stop"}`
+	if _, err := capture(t, payload, "hook", "Stop"); err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+
+	out := mustRun(t, "send", "--session", "b", "a-box", "operator says hi", "--human")
+	if !strings.Contains(out, "hop 0") || !strings.Contains(out, "human") {
+		t.Errorf("a trailing --human did not break the causal chain:\n%s", out)
+	}
+
+	st := openDB(t, dbPath)
+	var body string
+	if err := st.DB().QueryRowContext(t.Context(),
+		"SELECT body FROM messages ORDER BY id DESC LIMIT 1").Scan(&body); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if body != "operator says hi" {
+		t.Errorf("body = %q, want the flag kept out of it", body)
+	}
+}
+
+// TestE2ETrailingHumanUnattributed covers the dead end the same bug created for
+// anyone outside a session: the send was refused with a message naming the very
+// flag they had just supplied.
+func TestE2ETrailingHumanUnattributed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+
+	mustRun(t, "attach", "--session", "b", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "b", "b-box")
+	t.Setenv("PAGER_CLIENT", "none")
+
+	out, err := capture(t, "", "send", "b-box", "hello", "--human")
+	if err != nil {
+		t.Fatalf("send with a trailing --human was refused: %v\n%s", err, out)
+	}
+}
+
+// TestE2ETrailingSessionFlag: alias and claim declare one positional, so the
+// unparsed flag and its value stayed behind as extra arguments and the command
+// failed its own usage check before doing anything.
+func TestE2ETrailingSessionFlag(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+
+	mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "review-box", "--session", "s1")
+
+	if out := mustRun(t, "whoami", "--session", "s1"); !strings.Contains(out, "review-box") {
+		t.Errorf("the name set with a trailing --session did not stick:\n%s", out)
+	}
+
+	// claim reaches its own decision now rather than dying on usage. Its holder
+	// is still live, so refusing is the correct answer — the point is which
+	// refusal it is.
+	_, err := capture(t, "", "claim", "review-box", "--session", "s1")
+	if err == nil {
+		t.Fatal("claim succeeded against a live holder")
+	}
+	if strings.Contains(err.Error(), "usage:") {
+		t.Errorf("claim still fails on argument count: %v", err)
+	}
+}
+
 // TestE2ESendWithoutContextIsRefused is the fail-closed default at the command
 // line, and the escape hatch beside it.
 func TestE2ESendWithoutContextIsRefused(t *testing.T) {
