@@ -12,6 +12,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -224,7 +225,7 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(context.Context, *sql.C
 	}
 	defer func() {
 		if err != nil {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			rollbackTx(ctx, conn)
 		}
 	}()
 
@@ -235,6 +236,31 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(context.Context, *sql.C
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// rollbackTimeout bounds the cleanup rollback. A rollback on a connection that
+// already owns the write lock contends with nothing, so this is a guard against
+// a wedged connection rather than a contention budget.
+const rollbackTimeout = 2 * time.Second
+
+// rollbackTx undoes the transaction open on conn.
+//
+// ctx is usually already cancelled — an expired hook deadline is the ordinary
+// reason we are rolling back — and the driver returns before sending any SQL
+// when it is, so the rollback runs on a context that outlives the cancellation.
+//
+// If it still fails, the connection is left inside a transaction and nothing
+// notices: database/sql pools it, and the driver's IsValid checks only that the
+// handle is open and uninterrupted. From then on every BEGIN on that connection
+// fails, and a single-statement Exec silently joins the stale transaction
+// instead of committing. So a failed rollback discards the connection rather
+// than handing it to the next caller.
+func rollbackTx(ctx context.Context, conn *sql.Conn) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(rctx, "ROLLBACK"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
 }
 
 // isBusy reports whether err is SQLITE_BUSY. Extended result codes carry the

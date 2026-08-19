@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -61,6 +63,40 @@ func messageExists(t *testing.T, s *Store, id int64) bool {
 		t.Fatalf("lookup message %d: %v", id, err)
 	}
 	return n == 1
+}
+
+// writeLockHeld reports whether some connection outside this call still owns
+// the database's write lock, asked through a pool the test does not otherwise
+// touch.
+//
+// The probe lowers its own busy_timeout: five seconds is the right budget for a
+// real writer, but here a held lock is a possible answer rather than a fault,
+// and waiting the full DSN timeout for it would cost every call five seconds.
+func writeLockHeld(t *testing.T, path string) bool {
+	t.Helper()
+	probe, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	defer probe.Close() //nolint:errcheck // probe pool, nothing to flush
+	conn, err := probe.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("probe connection: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // returning the conn to the probe pool
+	if _, err := conn.ExecContext(t.Context(), "PRAGMA busy_timeout = 200"); err != nil {
+		t.Fatalf("probe busy_timeout: %v", err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		if isBusy(err) {
+			return true
+		}
+		t.Fatalf("probe begin: %v", err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatalf("probe rollback: %v", err)
+	}
+	return false
 }
 
 // TestConnectionPragmas proves the DSN-encoded settings actually reach the
@@ -454,5 +490,137 @@ func TestHostKeyUniqueness(t *testing.T) {
 	}
 	if err := insert("s4", nil); err != nil {
 		t.Fatalf("second unbound session: %v", err)
+	}
+}
+
+// insertLeaky writes one row through c. The tests below need a transaction that
+// has actually changed something, so that an unrolled-back one is visible as
+// data rather than only as a held lock.
+func insertLeaky(ctx context.Context, c *sql.Conn, s *Store, body string) error {
+	_, err := c.ExecContext(ctx, `
+		INSERT INTO messages(alias, body, hop, origin, created_at)
+		VALUES ('inbox', ?, 0, 'human', ?)`, body, s.Now())
+	return err
+}
+
+// TestWriteTxRollsBackWhenContextIsCancelled pins the failure an expired hook
+// deadline used to cause.
+//
+// The driver returns before sending any SQL once the context is done, so a
+// ROLLBACK issued on that context never reaches SQLite. database/sql then pools
+// a connection still inside a transaction, and neither it nor the driver
+// inspects for one — so the next writer's BEGIN fails, and it keeps failing,
+// while a single-statement Exec silently joins the stale transaction instead of
+// committing.
+func TestWriteTxRollsBackWhenContextIsCancelled(t *testing.T) {
+	s, _ := newStore(t)
+	// One connection, so the connection the cancelled transaction leaves behind
+	// is provably the one the next caller is handed. An unbounded pool could
+	// give the second WriteTx a fresh connection and pass without proving
+	// anything.
+	s.db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	err := s.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		if err := insertLeaky(ctx, c, s, "leaked"); err != nil {
+			return err
+		}
+		cancel() // the hook deadline expires between statements
+		return errors.New("write failed after the deadline expired")
+	})
+	if err == nil {
+		t.Fatal("WriteTx returned nil, want the failure its body reported")
+	}
+
+	// The transaction has to be gone from the connection, not merely abandoned
+	// on it: this is the assertion that fails before the fix.
+	if err := s.WriteTx(t.Context(), func(ctx context.Context, c *sql.Conn) error {
+		return insertLeaky(ctx, c, s, "later")
+	}); err != nil {
+		t.Fatalf("WriteTx after a cancelled one: %v", err)
+	}
+	if writeLockHeld(t, s.path) {
+		t.Error("the write lock is still held after the cancelled transaction")
+	}
+
+	var leaked int
+	if err := s.db.QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE body = 'leaked'").Scan(&leaked); err != nil {
+		t.Fatalf("count leaked rows: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the cancelled transaction left %d row(s) behind, want 0", leaked)
+	}
+}
+
+// TestWriteTxDiscardsConnectionWhenRollbackFails covers the other half of the
+// contract. A rollback that fails leaves the connection inside a transaction,
+// and returning it to the pool would poison every later caller, so it has to be
+// dropped instead.
+//
+// Committing inside the body and then reporting failure is the deterministic
+// way to reach a rollback with no transaction left to undo — the same state an
+// interrupted COMMIT reaches by chance.
+func TestWriteTxDiscardsConnectionWhenRollbackFails(t *testing.T) {
+	s, _ := newStore(t)
+	s.db.SetMaxOpenConns(1)
+
+	err := s.WriteTx(t.Context(), func(ctx context.Context, c *sql.Conn) error {
+		if _, err := c.ExecContext(ctx, "COMMIT"); err != nil {
+			return err
+		}
+		return errors.New("failed after the transaction had already committed")
+	})
+	if err == nil {
+		t.Fatal("WriteTx returned nil, want the failure its body reported")
+	}
+
+	if idle := s.db.Stats().Idle; idle != 0 {
+		t.Errorf("the connection went back to the pool (Idle=%d), want it discarded", idle)
+	}
+	if err := s.WriteTx(t.Context(), func(ctx context.Context, c *sql.Conn) error {
+		return insertLeaky(ctx, c, s, "later")
+	}); err != nil {
+		t.Fatalf("WriteTx after a discarded connection: %v", err)
+	}
+}
+
+// TestRollbackTxReleasesTheWriteLock exercises the helper on migrate's lock
+// mode. migrate has no seam for injecting a cancellation — its statements are
+// fixed and it runs inside Open — so this drives BEGIN EXCLUSIVE directly and
+// asserts the property migrate depends on: after a cancelled transaction the
+// lock is gone and the connection carries nothing forward.
+func TestRollbackTxReleasesTheWriteLock(t *testing.T) {
+	s, _ := newStore(t)
+	s.db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("connection: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("begin exclusive: %v", err)
+	}
+	if err := insertLeaky(ctx, conn, s, "leaked"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	cancel()
+
+	rollbackTx(ctx, conn)
+	if err := conn.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) {
+		t.Fatalf("close connection: %v", err)
+	}
+
+	if writeLockHeld(t, s.path) {
+		t.Error("the write lock is still held after rollbackTx")
+	}
+	var leaked int
+	if err := s.db.QueryRowContext(t.Context(),
+		"SELECT count(*) FROM messages WHERE body = 'leaked'").Scan(&leaked); err != nil {
+		t.Fatalf("count leaked rows: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("rollbackTx left %d row(s) behind, want 0", leaked)
 	}
 }
