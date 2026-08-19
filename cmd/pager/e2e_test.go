@@ -501,6 +501,20 @@ func TestE2EListAndPrune(t *testing.T) {
 	if out := mustRun(t, "ls", "--session", "b", "--expired"); !strings.Contains(out, "nothing here") {
 		t.Errorf("a fresh message showed up as expired:\n%s", out)
 	}
+
+	// Deliver it, then ask the two questions that must now differ. This is the
+	// cost contract the --waiting flag exists for: once an inbox has been read,
+	// polling it should not carry the history back every time.
+	payload := `{"session_id":"b","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"anything?"}`
+	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	if out := mustRun(t, "ls", "--session", "b"); !strings.Contains(out, "hello there") {
+		t.Errorf("a delivered message vanished from the full listing:\n%s", out)
+	}
+	if out := mustRun(t, "ls", "--session", "b", "--waiting"); !strings.Contains(out, "nothing here") {
+		t.Errorf("--waiting still rendered the delivered history:\n%s", out)
+	}
 	if out := mustRun(t, "prune", "--dry-run"); !strings.Contains(out, "0 message(s) would be deleted") {
 		t.Errorf("dry-run prune: %s", out)
 	}
