@@ -24,12 +24,46 @@ type Listed struct {
 	Expired bool
 }
 
-// List returns the messages addressed to a session's inboxes.
+// Filter narrows what List returns.
 //
-// With expiredOnly it returns exactly what automatic delivery has given up on,
-// which is the point of the flag: those messages are not lost, and listing them
-// is how they get noticed and resent.
-func List(ctx context.Context, st *store.Store, session string, expiredOnly bool, lim Limits) ([]Listed, error) {
+// The three values nest rather than partition: an expired message is one that
+// is still waiting and has also aged out, so expired ⊂ waiting ⊂ all. That is
+// why this is one value and not two booleans — there is no combination for the
+// query to reconcile, only a choice of how far to narrow.
+type Filter int
+
+const (
+	// FilterAll returns every message addressed to the session, delivered ones
+	// included.
+	FilterAll Filter = iota
+	// FilterWaiting returns only what has not been delivered yet. This is what a
+	// poll during a long turn wants: the answer is usually empty, and the cost
+	// of asking should match what it finds rather than what has accumulated.
+	FilterWaiting
+	// FilterExpired returns exactly what automatic delivery has given up on:
+	// those messages are not lost, and listing them is how they get noticed and
+	// resent.
+	FilterExpired
+)
+
+// FilterFrom resolves the two narrowing flags the CLI and the MCP server each
+// expose.
+//
+// Expired wins when both are set. The two are not in conflict — expired is the
+// intersection — so applying the narrower one is what honours both, and there
+// is nothing to reject.
+func FilterFrom(waiting, expired bool) Filter {
+	switch {
+	case expired:
+		return FilterExpired
+	case waiting:
+		return FilterWaiting
+	}
+	return FilterAll
+}
+
+// List returns the messages addressed to a session's inboxes, narrowed by f.
+func List(ctx context.Context, st *store.Store, session string, f Filter, lim Limits) ([]Listed, error) {
 	windowStart := st.Now() - lim.InjectTTL.Milliseconds()
 
 	query := `
@@ -38,7 +72,10 @@ func List(ctx context.Context, st *store.Store, session string, expiredOnly bool
 		  FROM messages m JOIN aliases a ON a.alias = m.alias
 		 WHERE a.session_id = ?`
 	args := []any{windowStart, session}
-	if expiredOnly {
+	switch f {
+	case FilterWaiting:
+		query += " AND m.delivered_at IS NULL"
+	case FilterExpired:
 		query += " AND m.delivered_at IS NULL AND m.created_at < ?"
 		args = append(args, windowStart)
 	}

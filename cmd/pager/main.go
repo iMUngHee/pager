@@ -38,7 +38,7 @@ var commands = []command{
 	{"attach", "[--session <id>] [--tool <tool>] [--root <dir>] [--pm-ref <ref>]", "Register this session as a delivery target", attach},
 	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
 	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
-	{"ls", "[--expired] [--session <id>]", "List messages addressed to this session", list},
+	{"ls", "[--waiting] [--expired] [--session <id>]", "List messages addressed to this session", list},
 	{"who", "", "List the sessions that can be paged right now", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"export", "", "Write every stored message to stdout as JSONL", export},
@@ -205,6 +205,7 @@ func claim(args []string) error {
 func list(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	session := fs.String("session", "", "session id to list for")
+	waiting := fs.Bool("waiting", false, "show only messages not delivered yet")
 	expired := fs.Bool("expired", false, "show only messages past the automatic delivery window")
 	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
@@ -221,7 +222,7 @@ func list(args []string) error {
 	if err != nil {
 		return err
 	}
-	messages, err := deliver.List(ctx, st, id, *expired, deliver.LimitsFromEnv())
+	messages, err := deliver.List(ctx, st, id, deliver.FilterFrom(*waiting, *expired), deliver.LimitsFromEnv())
 	if err != nil {
 		return err
 	}

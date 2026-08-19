@@ -147,7 +147,7 @@ func TestToolsAreAdvertised(t *testing.T) {
 
 	resp := s.call(2, "tools/list", map[string]any{})
 	raw, _ := json.Marshal(resp)
-	for _, want := range []string{"msg_send", "msg_list", "target", "body"} {
+	for _, want := range []string{"msg_send", "msg_list", "target", "body", "waiting", "expired"} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("tools/list does not advertise %q:\n%s", want, raw)
 		}
@@ -262,6 +262,56 @@ func TestListShowsWhatIsWaiting(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("msg_list output is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestListShowsOnlyWhatIsWaiting is the MCP half of the cost contract. The rule
+// that tells an agent to poll during a long turn only works if the poll stays
+// cheap once the inbox has been read.
+func TestListShowsOnlyWhatIsWaiting(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	t.Setenv("PAGER_SESSION", "me")
+	send := func(body string) {
+		t.Helper()
+		if _, err := deliver.Send(t.Context(), st, deliver.SendRequest{
+			Alias: "my-box", Body: body, Label: "@someone", Human: true,
+		}); err != nil {
+			t.Fatalf("Send(%q): %v", body, err)
+		}
+	}
+
+	send("already read")
+	batch, err := deliver.CollectBatch(t.Context(), st, "me", deliver.DefaultLimits())
+	if err != nil {
+		t.Fatalf("CollectBatch: %v", err)
+	}
+	if _, err := deliver.ConfirmDelivery(t.Context(), st, "me", batch.Token); err != nil {
+		t.Fatalf("ConfirmDelivery: %v", err)
+	}
+	send("still waiting")
+
+	s := start(t, st)
+	call := func(args map[string]any) string {
+		t.Helper()
+		resp := s.call(2, "tools/call", map[string]any{"name": "msg_list", "arguments": args})
+		if isError(t, resp) {
+			t.Fatalf("msg_list failed: %s", text(t, resp))
+		}
+		return text(t, resp)
+	}
+
+	// Unnarrowed, the delivered message is still part of the answer.
+	if got := call(map[string]any{}); !strings.Contains(got, "already read") {
+		t.Errorf("the full listing dropped the delivered message:\n%s", got)
+	}
+	// Narrowed, it must not be — that absence is the whole point of the flag.
+	got := call(map[string]any{"waiting": true})
+	if strings.Contains(got, "already read") {
+		t.Errorf("waiting=true still carried the delivered message:\n%s", got)
+	}
+	if !strings.Contains(got, "still waiting") {
+		t.Errorf("waiting=true dropped the undelivered message:\n%s", got)
 	}
 }
 

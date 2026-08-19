@@ -1,6 +1,7 @@
 package deliver
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -131,7 +132,7 @@ func TestListReportsState(t *testing.T) {
 	expired := queue(t, st, "inboxB", "@a", "too late")
 	fake.Advance(lim.InjectTTL + time.Hour)
 
-	all, err := List(ctx, st, "B", false, lim)
+	all, err := List(ctx, st, "B", FilterAll, lim)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -146,11 +147,91 @@ func TestListReportsState(t *testing.T) {
 		t.Errorf("the aged message = %+v, want undelivered and expired", states[expired])
 	}
 
-	only, err := List(ctx, st, "B", true, lim)
+	only, err := List(ctx, st, "B", FilterExpired, lim)
 	if err != nil {
 		t.Fatalf("List expired: %v", err)
 	}
 	if len(only) != 1 || only[0].ID != expired {
 		t.Errorf("expired-only listing = %+v, want just #%d", only, expired)
+	}
+}
+
+// TestListFiltersByDeliveryState pins the cost contract: asking what is waiting
+// must not carry the messages that have already been read.
+//
+// The three sets are asserted by id rather than by count, because the counts
+// alone would also match a filter that returned the wrong rows — and waiting is
+// asserted to CONTAIN expired, since the two nest rather than exclude each
+// other.
+func TestListFiltersByDeliveryState(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+	lim := DefaultLimits()
+	inboxSession(t, st, "B", "inboxB")
+
+	// Delivered: queued, collected, confirmed.
+	delivered := queue(t, st, "inboxB", "@a", "already read")
+	batch := collect(t, st, "B", lim)
+	if _, err := ConfirmDelivery(ctx, st, "B", batch.Token); err != nil {
+		t.Fatalf("ConfirmDelivery: %v", err)
+	}
+
+	// Expired: queued, then aged past the injection window.
+	expired := queue(t, st, "inboxB", "@a", "too late")
+	fake.Advance(lim.InjectTTL + time.Hour)
+
+	// Waiting: queued after the clock moved, so it is inside the window.
+	fresh := queue(t, st, "inboxB", "@a", "still fresh")
+
+	ids := func(f Filter) []int64 {
+		t.Helper()
+		got, err := List(ctx, st, "B", f, lim)
+		if err != nil {
+			t.Fatalf("List(%d): %v", f, err)
+		}
+		out := make([]int64, len(got))
+		for i, m := range got {
+			out[i] = m.ID
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		name   string
+		filter Filter
+		want   []int64
+	}{
+		{"all", FilterAll, []int64{delivered, expired, fresh}},
+		{"waiting", FilterWaiting, []int64{expired, fresh}},
+		{"expired", FilterExpired, []int64{expired}},
+	} {
+		if got := ids(tc.filter); !slices.Equal(got, tc.want) {
+			t.Errorf("%s listing = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The nesting is the part a future change is most likely to break: narrowing
+	// to waiting must not quietly drop the aged messages that still need resending.
+	if got := ids(FilterWaiting); !slices.Contains(got, expired) {
+		t.Errorf("waiting listing %v does not contain the expired message #%d", got, expired)
+	}
+}
+
+// TestFilterFromPrefersExpired fixes the precedence rule. Expired is the
+// intersection of the two flags, so applying it is what honours both.
+func TestFilterFromPrefersExpired(t *testing.T) {
+	for _, tc := range []struct {
+		waiting, expired bool
+		want             Filter
+	}{
+		{false, false, FilterAll},
+		{true, false, FilterWaiting},
+		{false, true, FilterExpired},
+		{true, true, FilterExpired},
+	} {
+		if got := FilterFrom(tc.waiting, tc.expired); got != tc.want {
+			t.Errorf("FilterFrom(waiting=%v, expired=%v) = %d, want %d",
+				tc.waiting, tc.expired, got, tc.want)
+		}
 	}
 }

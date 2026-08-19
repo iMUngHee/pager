@@ -121,7 +121,8 @@ codex  mcp add pager       -- pager mcp
 ```bash
 pager who                                # 지금 부를 수 있는 세션 목록
 pager send hica "파서 작업 넘긴다"         # 보내기
-pager ls                                 # 내 앞으로 온 것
+pager ls                                 # 내 앞으로 온 것 (읽은 것까지 전부)
+pager ls --waiting                       # 아직 안 받은 것만 — 작업 중 확인용
 pager ls --expired                       # 자동 배달 창을 넘긴 것
 pager whoami                             # 내 세션과 내 이름
 pager alias review-box                   # 이름을 직접 고르기 (자동 이름을 대신한다)

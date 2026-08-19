@@ -79,7 +79,9 @@ func (s *Server) register() {
 	s.mcp.AddTool(
 		mcp.NewTool("msg_list",
 			mcp.WithDescription(
-				"List messages addressed to this session, including ones already delivered."),
+				"List messages addressed to this session. Returns the whole history, delivered ones included, unless narrowed."),
+			mcp.WithBoolean("waiting",
+				mcp.Description("Show only messages not delivered yet — the cheap way to poll during a long turn, and usually empty.")),
 			mcp.WithBoolean("expired",
 				mcp.Description("Show only messages past the automatic delivery window — these are not retried and need resending by hand.")),
 		),
@@ -141,13 +143,15 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 }
 
 func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	expired, _ := req.GetArguments()["expired"].(bool)
+	args := req.GetArguments()
+	waiting, _ := args["waiting"].(bool)
+	expired, _ := args["expired"].(bool)
 
 	session, err := s.session(ctx)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	messages, err := deliver.List(ctx, s.st, session, expired, deliver.LimitsFromEnv())
+	messages, err := deliver.List(ctx, s.st, session, deliver.FilterFrom(waiting, expired), deliver.LimitsFromEnv())
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
