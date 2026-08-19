@@ -49,8 +49,18 @@ const deletable = `
      AND id NOT IN (SELECT last_inbound_id FROM sessions WHERE last_inbound_id IS NOT NULL)
      AND id NOT IN (SELECT cause_id FROM messages WHERE cause_id IS NOT NULL)`
 
-// PruneNow deletes expired messages unconditionally — the `pager prune` path.
-// With dryRun it only counts, changing nothing.
+// PruneNow deletes expired messages regardless of the interval — the
+// `pager prune` path. With dryRun it only counts, changing nothing.
+//
+// It still takes the lease. Ignoring the interval is the point of asking for a
+// prune; ignoring the exclusion as well would let this call and a hook's
+// opportunistic prune append to the archive at the same offset, and the loser's
+// records would be gone from the file while still being deleted from the
+// database. A call that cannot take the lease reports Ran false and does
+// nothing, which is what `pager prune` renders.
+//
+// dryRun deliberately takes no lease: it writes nothing, so a prune under way is
+// no reason for a count to fail.
 func (s *Store) PruneNow(ctx context.Context, retention time.Duration, dryRun bool) (PruneResult, error) {
 	cutoff := s.Now() - retention.Milliseconds()
 	if dryRun {
@@ -60,6 +70,18 @@ func (s *Store) PruneNow(ctx context.Context, retention time.Duration, dryRun bo
 		}
 		return PruneResult{Ran: true, Deleted: n}, nil
 	}
+
+	token, err := s.acquirePrune(ctx, pruneOnDemand)
+	if err != nil || token == "" {
+		return PruneResult{}, err
+	}
+	// Released on every exit, unlike the scheduled path which keeps the lease on
+	// failure so the interval stays unadvanced. A manual prune's failure is meant
+	// to be read and retried at once — README points at `pager prune` erroring as
+	// the way an archive problem shows up — so holding the lease afterwards would
+	// block the retry that fixes it.
+	defer func() { _, _ = s.releasePruneLease(ctx, token) }()
+
 	n, err := s.deleteExpired(ctx, cutoff)
 	return PruneResult{Ran: true, Deleted: n}, err
 }
@@ -86,15 +108,41 @@ func (s *Store) PruneOpportunistic(ctx context.Context, retention time.Duration)
 	return PruneResult{Ran: true, Deleted: n}, nil
 }
 
-// acquirePruneGate tries to take the prune gate, returning a non-empty token
-// when this process won and must perform the prune.
+// pruneMode says which half of the gate a caller needs.
 //
-// Both conditions live inside the UPDATE. Checking them first and updating
-// after would let every hook that observed "24h elapsed" believe it had won.
-// The started_at clause is what distinguishes "nobody is pruning" from "a
-// prune is under way" — without it the gate only blocks runners that arrive
-// after the first one has already recorded completion, which is no gate at all.
+// The two halves are separable, and the manual path needs only one of them. A
+// prune asked for on demand must bypass the once-a-day interval — that is what
+// asking for it means — but it must not bypass the exclusion, because the
+// archive append is a file write outside any transaction: two appends racing
+// compute the same end offset and overwrite each other's records, leaving a file
+// that still parses and is simply missing them.
+type pruneMode int
+
+const (
+	pruneScheduled pruneMode = iota // honours the interval and the exclusion
+	pruneOnDemand                   // exclusion only
+)
+
+// acquirePruneGate tries to take the whole gate — the hook path.
 func (s *Store) acquirePruneGate(ctx context.Context) (string, error) {
+	return s.acquirePrune(ctx, pruneScheduled)
+}
+
+// acquirePrune tries to take the gate, returning a non-empty token when this
+// process won and must perform the prune.
+//
+// Every condition lives inside the UPDATE. Checking them first and updating
+// after would let every hook that observed "24h elapsed" believe it had won.
+//
+// The exclusion clause keys on lease_token, which both release paths clear, so
+// it means "nobody is pruning right now" — and prune_started_at only decides
+// whether a holder has been there long enough to be presumed stranded. Reading
+// exclusion off prune_started_at alone would be wrong, because releasing does
+// not clear it: a prune that finished a minute ago would still look like one in
+// flight. The scheduled path hides that, since its 24h prune_done_at clause
+// already blocks anything that recent; pruneOnDemand has no such cover and would
+// refuse for the whole lease interval after any prune completed.
+func (s *Store) acquirePrune(ctx context.Context, mode pruneMode) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("prune token: %w", err)
@@ -102,13 +150,18 @@ func (s *Store) acquirePruneGate(ctx context.Context) (string, error) {
 	token := hex.EncodeToString(buf[:])
 
 	now := s.Now()
-	res, err := s.Exec(ctx, `
+	query := `
 		UPDATE meta
 		   SET lease_token = ?, prune_started_at = ?
 		 WHERE key = 'prune'
-		   AND (prune_done_at    IS NULL OR prune_done_at    < ?)
-		   AND (prune_started_at IS NULL OR prune_started_at < ?)`,
-		token, now, now-pruneGate.Milliseconds(), now-pruneLease.Milliseconds())
+		   AND (lease_token IS NULL OR prune_started_at IS NULL OR prune_started_at < ?)`
+	args := []any{token, now, now - pruneLease.Milliseconds()}
+	if mode == pruneScheduled {
+		query += " AND (prune_done_at IS NULL OR prune_done_at < ?)"
+		args = append(args, now-pruneGate.Milliseconds())
+	}
+
+	res, err := s.Exec(ctx, query, args...)
 	if err != nil {
 		return "", fmt.Errorf("acquire prune gate: %w", err)
 	}
@@ -137,6 +190,25 @@ func (s *Store) releasePruneGate(ctx context.Context, token string) (bool, error
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("release prune gate: %w", err)
+	}
+	return n > 0, nil
+}
+
+// releasePruneLease drops the lease without recording completion.
+//
+// A manual prune must not consume the day's scheduled slot: suppressing the
+// automatic prune for the next 24h would be a change to the retention policy
+// rather than the serialisation this lease exists for. The token condition
+// carries the same stranded-runner meaning it does in releasePruneGate.
+func (s *Store) releasePruneLease(ctx context.Context, token string) (bool, error) {
+	res, err := s.Exec(ctx,
+		"UPDATE meta SET lease_token = NULL WHERE key = 'prune' AND lease_token = ?", token)
+	if err != nil {
+		return false, fmt.Errorf("release prune lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("release prune lease: %w", err)
 	}
 	return n > 0, nil
 }

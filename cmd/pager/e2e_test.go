@@ -520,6 +520,40 @@ func TestE2EListAndPrune(t *testing.T) {
 	}
 }
 
+// TestE2EPruneSaysWhenAnotherPruneHoldsTheLease is what the serialisation is
+// worth to a person. A prune that yields deletes nothing, and printing "0
+// message(s) deleted" for that would read as "nothing had expired" — the
+// opposite of the truth, and the reason this line exists rather than the count.
+func TestE2EPruneSaysWhenAnotherPruneHoldsTheLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+
+	st, err := store.Open(t.Context(), dbPath, clock.System{})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// Stand in for a prune that is under way: the lease is taken and not yet
+	// released. Writing meta directly is what lets the command run in this
+	// process without a second one actually pruning.
+	if _, err := st.Exec(t.Context(),
+		"UPDATE meta SET lease_token = 'held', prune_started_at = ? WHERE key = 'prune'",
+		st.Now()); err != nil {
+		t.Fatalf("hold the lease: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	out := mustRun(t, "prune")
+	if !strings.Contains(out, "another prune is already running") {
+		t.Errorf("prune did not say it yielded:\n%s", out)
+	}
+	if strings.Contains(out, "message(s) deleted") {
+		t.Errorf("prune reported a deletion count while yielding:\n%s", out)
+	}
+}
+
 // TestE2EExportRoundTrip drives the command a person actually types and checks
 // what lands on stdout is JSONL carrying the message they sent.
 func TestE2EExportRoundTrip(t *testing.T) {
