@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -622,5 +623,172 @@ func TestRollbackTxReleasesTheWriteLock(t *testing.T) {
 	}
 	if leaked != 0 {
 		t.Errorf("rollbackTx left %d row(s) behind, want 0", leaked)
+	}
+}
+
+// TestManualPruneYieldsToARunningPrune is the exclusion half of the contract.
+//
+// A manual prune has to bypass the once-a-day interval — that is what asking for
+// it means — but not the exclusion. The archive append writes at an absolute
+// offset outside any transaction, so a second prune starting mid-append computes
+// the same offset and overwrites the first one's records, leaving a file that
+// still parses and is simply missing them.
+func TestManualPruneYieldsToARunningPrune(t *testing.T) {
+	s, _ := newStore(t)
+	insertDelivered(t, s, DefaultRetention+time.Hour)
+	before := countMessages(t, s)
+
+	// Somebody else is mid-prune: the lease is held and not yet released.
+	held, err := s.acquirePruneGate(t.Context())
+	if err != nil || held == "" {
+		t.Fatalf("seed the in-progress lease: token=%q err=%v", held, err)
+	}
+
+	res, err := s.PruneNow(t.Context(), DefaultRetention, false)
+	if err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+	if res.Ran {
+		t.Error("PruneNow ran while another prune held the lease")
+	}
+	if res.Deleted != 0 {
+		t.Errorf("deleted = %d while another prune held the lease, want 0", res.Deleted)
+	}
+	if got := countMessages(t, s); got != before {
+		t.Errorf("message count is %d, want %d — the yielding prune still deleted", got, before)
+	}
+}
+
+// TestConcurrentPrunesLoseNoArchiveRecords states the invariant the archive
+// exists for: nothing leaves the database without being in the file first.
+//
+// Both entry points run against one database at once, which is the shape a
+// manual `pager prune` and a hook's opportunistic prune make.
+func TestConcurrentPrunesLoseNoArchiveRecords(t *testing.T) {
+	s, _ := newStore(t)
+	const seeded = 12
+	ids := make([]int64, seeded)
+	for i := range ids {
+		ids[i] = insertDelivered(t, s, DefaultRetention+time.Hour)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-start
+		if _, err := s.PruneNow(context.Background(), DefaultRetention, false); err != nil {
+			t.Errorf("PruneNow: %v", err)
+		}
+	})
+	wg.Go(func() {
+		<-start
+		if _, err := s.PruneOpportunistic(context.Background(), DefaultRetention); err != nil {
+			t.Errorf("PruneOpportunistic: %v", err)
+		}
+	})
+	close(start)
+	wg.Wait()
+
+	archived := archivedIDs(t, s)
+	for _, id := range ids {
+		if !messageExists(t, s, id) && !slices.Contains(archived, id) {
+			t.Errorf("message %d left the database without reaching the archive", id)
+		}
+	}
+}
+
+// TestManualPruneIgnoresTheInterval is the other half: taking the lease must not
+// have made `pager prune` wait for the daily slot. Asking for a prune is the
+// whole reason the command exists.
+func TestManualPruneIgnoresTheInterval(t *testing.T) {
+	s, _ := newStore(t)
+	id := insertDelivered(t, s, DefaultRetention+time.Hour)
+
+	// A scheduled prune has just finished, so the interval is closed.
+	token, err := s.acquirePruneGate(t.Context())
+	if err != nil || token == "" {
+		t.Fatalf("seed a completed prune: token=%q err=%v", token, err)
+	}
+	if ok, err := s.releasePruneGate(t.Context(), token); err != nil || !ok {
+		t.Fatalf("release: ok=%v err=%v", ok, err)
+	}
+	if shut, err := s.acquirePruneGate(t.Context()); err != nil || shut != "" {
+		t.Fatalf("the interval is not closed: token=%q err=%v", shut, err)
+	}
+
+	res, err := s.PruneNow(t.Context(), DefaultRetention, false)
+	if err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+	if !res.Ran || res.Deleted != 1 {
+		t.Errorf("PruneNow = %+v, want Ran with 1 deleted — it waited for the interval", res)
+	}
+	if messageExists(t, s, id) {
+		t.Error("the expired message survived a manual prune")
+	}
+}
+
+// TestManualPruneLeavesTheIntervalUnadvanced pins the release semantics. A
+// manual prune drops its lease without recording completion, so it does not
+// consume the day's scheduled slot — that would be a retention-policy change
+// rather than the serialisation the lease is for.
+func TestManualPruneLeavesTheIntervalUnadvanced(t *testing.T) {
+	s, _ := newStore(t)
+	insertDelivered(t, s, DefaultRetention+time.Hour)
+
+	if _, err := s.PruneNow(t.Context(), DefaultRetention, false); err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+
+	var doneAt any
+	var heldToken any
+	if err := s.db.QueryRowContext(t.Context(),
+		"SELECT prune_done_at, lease_token FROM meta WHERE key = 'prune'").Scan(&doneAt, &heldToken); err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if doneAt != nil {
+		t.Errorf("prune_done_at = %v after a manual prune, want NULL", doneAt)
+	}
+	if heldToken != nil {
+		t.Errorf("lease_token = %v after a manual prune, want NULL", heldToken)
+	}
+
+	// The scheduled prune therefore still gets its turn.
+	res, err := s.PruneOpportunistic(t.Context(), DefaultRetention)
+	if err != nil {
+		t.Fatalf("PruneOpportunistic: %v", err)
+	}
+	if !res.Ran {
+		t.Error("the manual prune consumed the scheduled slot")
+	}
+}
+
+// TestManualPruneReleasesTheLeaseOnFailure keeps the documented recovery path
+// working. README points at `pager prune` erroring as how an archive problem
+// surfaces, so the retry after fixing the cause must not be locked out for the
+// lease interval.
+func TestManualPruneReleasesTheLeaseOnFailure(t *testing.T) {
+	t.Setenv("PAGER_ARCHIVE", "")
+	s, _ := newStore(t)
+	insertDelivered(t, s, DefaultRetention+time.Hour)
+
+	// A directory standing where the archive file belongs makes the open fail.
+	if err := os.Mkdir(archivePath(s.path), 0o700); err != nil {
+		t.Fatalf("block archive path: %v", err)
+	}
+
+	if _, err := s.PruneNow(t.Context(), DefaultRetention, false); err == nil {
+		t.Fatal("PruneNow succeeded although the archive could not be written")
+	}
+
+	// The retry must reach the same failure rather than be turned away. Ran
+	// distinguishes the two: a retry locked out by the lease reports Ran false
+	// with no error, which reads as "nothing to do" and hides the real problem.
+	res, err := s.PruneNow(t.Context(), DefaultRetention, false)
+	if !res.Ran {
+		t.Fatal("the retry was locked out by the failed prune's lease")
+	}
+	if err == nil {
+		t.Error("the retry reported success although the archive is still blocked")
 	}
 }

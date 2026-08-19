@@ -311,6 +311,13 @@ func prune(args []string) error {
 		fmt.Printf("%d message(s) would be deleted\n", res.Deleted)
 		return nil
 	}
+	// A prune under way holds the lease, and joining it would mean two processes
+	// appending to the archive at the same offset. Saying so beats printing "0
+	// message(s) deleted", which reads as "nothing was expired".
+	if !res.Ran {
+		fmt.Println("another prune is already running — nothing was deleted")
+		return nil
+	}
 	fmt.Printf("%d message(s) deleted\n", res.Deleted)
 	return nil
 }
