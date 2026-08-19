@@ -116,7 +116,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			rollbackTx(ctx, conn)
 		}
 	}()
 
