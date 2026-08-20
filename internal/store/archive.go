@@ -35,13 +35,19 @@ const archiveTime = "2006-01-02T15:04:05.000Z07:00"
 // Record is one message as the archive and `pager export` write it.
 //
 // The four claim_* columns are deliberately absent. They are delivery-lease
-// bookkeeping, meaningless once a message has been delivered — which every
-// archived message has — and a claim token is not something to leave in a file.
+// bookkeeping, spent once a message has been delivered, and a claim token is not
+// something to leave in a file. Note that "already delivered" describes what
+// prune archives, not everything this struct carries: ExportAll selects every
+// row, undelivered ones included, so the two delivery fields below are genuinely
+// nullable here.
 //
 // Field order here is the field order on the wire: encoding/json emits struct
 // fields in declaration order. That, plus the encoder in encodeRecord, is what
 // makes two encodings of the same row byte-identical, which is what lets a
-// reader deduplicate whole lines.
+// reader deduplicate whole lines. Adding a field changes those bytes, so a
+// record written before the addition and the same row written after it no longer
+// fold together — archiveVersion tolerates that (see its comment) and README
+// documents the dedup as a convenience rather than a guarantee.
 type Record struct {
 	V             int     `json:"v"`
 	ID            int64   `json:"id"`
@@ -54,12 +60,18 @@ type Record struct {
 	Hop           int     `json:"hop"`
 	DeliveredAt   *string `json:"delivered_at"`
 	DeliverySeq   *int64  `json:"delivery_seq"`
-	Body          string  `json:"body"`
+	// ListedAt is when an agent first pulled this message up in a listing of its
+	// own inbox, while it was still undelivered. It is the other half of having
+	// been read, and it is exported because it is not recoverable from anything
+	// else in the record: without it a backup cannot tell a message nobody
+	// touched from one an agent read and left.
+	ListedAt *string `json:"listed_at"`
+	Body     string  `json:"body"`
 }
 
 // recordColumns is the SELECT list Record scans, in Record's own order.
 const recordColumns = `id, created_at, alias, sender_session, sender_label,
-	origin, cause_id, hop, delivered_at, delivery_seq, body`
+	origin, cause_id, hop, delivered_at, delivery_seq, listed_at, body`
 
 // archivePath is where a database's archive lives.
 func archivePath(dbPath string) string {
@@ -208,9 +220,10 @@ func eachRecord(rows *sql.Rows, fn func(Record) error) error {
 			cause     sql.NullInt64
 			delivered sql.NullInt64
 			seq       sql.NullInt64
+			listed    sql.NullInt64
 		)
 		if err := rows.Scan(&r.ID, &created, &r.Alias, &sender, &r.SenderLabel,
-			&r.Origin, &cause, &r.Hop, &delivered, &seq, &r.Body); err != nil {
+			&r.Origin, &cause, &r.Hop, &delivered, &seq, &listed, &r.Body); err != nil {
 			return fmt.Errorf("scan message: %w", err)
 		}
 		r.V = archiveVersion
@@ -227,6 +240,10 @@ func eachRecord(rows *sql.Rows, fn func(Record) error) error {
 		}
 		if seq.Valid {
 			r.DeliverySeq = &seq.Int64
+		}
+		if listed.Valid {
+			stamp := archiveStamp(listed.Int64)
+			r.ListedAt = &stamp
 		}
 		if err := fn(r); err != nil {
 			return err
