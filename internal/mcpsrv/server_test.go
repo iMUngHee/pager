@@ -3,6 +3,7 @@ package mcpsrv
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"path/filepath"
@@ -268,6 +269,12 @@ func TestListShowsWhatIsWaiting(t *testing.T) {
 // TestListShowsOnlyWhatIsWaiting is the MCP half of the cost contract. The rule
 // that tells an agent to poll during a long turn only works if the poll stays
 // cheap once the inbox has been read.
+//
+// "Read" now covers both ways it happens, which is why the third message is sent
+// after the unnarrowed listing rather than before: that listing marks what it
+// returns, so a message queued before it has been dealt with by the time the
+// narrowed call runs. The delivered message is still asserted absent for its own
+// separate reason — nothing stamped it, so only delivered_at excludes it.
 func TestListShowsOnlyWhatIsWaiting(t *testing.T) {
 	st := newStore(t)
 	seed(t, st, "me", "my-box")
@@ -301,17 +308,105 @@ func TestListShowsOnlyWhatIsWaiting(t *testing.T) {
 		return text(t, resp)
 	}
 
-	// Unnarrowed, the delivered message is still part of the answer.
+	// Unnarrowed, the delivered message is still part of the answer. This call
+	// also records everything it returns, which the assertions below rely on.
 	if got := call(map[string]any{}); !strings.Contains(got, "already read") {
 		t.Errorf("the full listing dropped the delivered message:\n%s", got)
 	}
-	// Narrowed, it must not be — that absence is the whole point of the flag.
+
+	// Queued after that listing, so it is the one thing nobody has dealt with.
+	send("never listed")
+
 	got := call(map[string]any{"waiting": true})
+	// Absent because a hook injected it, not because anything stamped it: the
+	// listing above skips delivered rows, so this still tests what it always did.
 	if strings.Contains(got, "already read") {
 		t.Errorf("waiting=true still carried the delivered message:\n%s", got)
 	}
-	if !strings.Contains(got, "still waiting") {
-		t.Errorf("waiting=true dropped the undelivered message:\n%s", got)
+	// Absent because the previous listing showed it. This is the defect being
+	// closed: a message read by a poll used to come back on every later poll.
+	if strings.Contains(got, "still waiting") {
+		t.Errorf("waiting=true repeated a message an earlier listing already showed:\n%s", got)
+	}
+	if !strings.Contains(got, "never listed") {
+		t.Errorf("waiting=true dropped the message nothing has dealt with:\n%s", got)
+	}
+}
+
+// TestListingOverMCPRecordsTheRead is the write half: the same call that hands an
+// agent its mail is what records that the mail was handed over.
+//
+// The stamp is asserted on the column rather than through a filter, so a filter
+// change cannot make this test pass for the wrong reason. The delivered message
+// is checked too, because leaving it alone is what gives listed_at one meaning.
+func TestListingOverMCPRecordsTheRead(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	t.Setenv("PAGER_SESSION", "me")
+	t.Setenv("PAGER_CLIENT", "none")
+
+	send := func(body string) int64 {
+		t.Helper()
+		sent, err := deliver.Send(t.Context(), st, deliver.SendRequest{
+			Alias: "my-box", Body: body, Label: "@someone", Human: true,
+		})
+		if err != nil {
+			t.Fatalf("Send(%q): %v", body, err)
+		}
+		return sent.ID
+	}
+	listedAt := func(id int64) (int64, bool) {
+		t.Helper()
+		var v sql.NullInt64
+		if err := st.DB().QueryRowContext(t.Context(),
+			"SELECT listed_at FROM messages WHERE id = ?", id).Scan(&v); err != nil {
+			t.Fatalf("read listed_at of #%d: %v", id, err)
+		}
+		return v.Int64, v.Valid
+	}
+
+	delivered := send("a hook took this one")
+	batch, err := deliver.CollectBatch(t.Context(), st, "me", deliver.DefaultLimits())
+	if err != nil {
+		t.Fatalf("CollectBatch: %v", err)
+	}
+	if _, err := deliver.ConfirmDelivery(t.Context(), st, "me", batch.Token); err != nil {
+		t.Fatalf("ConfirmDelivery: %v", err)
+	}
+	polled := send("nothing has injected this")
+
+	if _, ok := listedAt(polled); ok {
+		t.Fatal("listed_at was already set before any listing")
+	}
+
+	s := start(t, st)
+	resp := s.call(2, "tools/call", map[string]any{
+		"name": "msg_list", "arguments": map[string]any{},
+	})
+	if isError(t, resp) {
+		t.Fatalf("msg_list failed: %s", text(t, resp))
+	}
+	body := text(t, resp)
+	if strings.Contains(body, "could not record") {
+		t.Fatalf("the listing reported a failed stamp:\n%s", body)
+	}
+
+	first, ok := listedAt(polled)
+	if !ok {
+		t.Error("listing over MCP did not record the read")
+	}
+	if _, ok := listedAt(delivered); ok {
+		t.Error("listing over MCP stamped a message that had already been delivered")
+	}
+
+	// A second listing must not move the first sighting.
+	if isError(t, s.call(3, "tools/call", map[string]any{
+		"name": "msg_list", "arguments": map[string]any{},
+	})) {
+		t.Fatal("second msg_list failed")
+	}
+	if again, _ := listedAt(polled); again != first {
+		t.Errorf("listed_at moved from %d to %d across two listings", first, again)
 	}
 }
 

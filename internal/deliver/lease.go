@@ -165,10 +165,23 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 		return nil, 0, fmt.Errorf("list candidates: %w", err)
 	}
 
+	// This count is not part of the delivery decision -- the candidate SELECT
+	// above is, and it deliberately ignores listed_at so a polled message is
+	// re-injected. This one exists to be rendered, and renderTail spends it on a
+	// sentence that names `pager ls --expired`. So it has to be counted the way
+	// that command counts: a message an agent has already read by polling needs
+	// no resending, and reporting it here would point the reader at a listing
+	// shorter than the number they were just given.
+	//
+	// It does reach selectWithinBudget, which measures Render(trial) against the
+	// byte budget, so the count influences how many messages fit in one batch.
+	// That is bounded and one-directional: this predicate is strictly narrower
+	// than the old one, so the count never rises, the tail never grows, and a
+	// batch never shrinks.
 	var expired int
 	if err := st.DB().QueryRowContext(ctx, `
 		SELECT count(*) FROM messages m JOIN aliases a ON a.alias = m.alias
-		 WHERE a.session_id = ? AND m.delivered_at IS NULL AND m.created_at < ?`,
+		 WHERE a.session_id = ?`+undealtWith+` AND m.created_at < ?`,
 		session, windowStart).Scan(&expired); err != nil {
 		return nil, 0, fmt.Errorf("count expired: %w", err)
 	}
