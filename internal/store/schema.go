@@ -6,13 +6,35 @@ import (
 	"fmt"
 )
 
-// schemaVersion is the user_version this binary expects. Bump it and add a
-// migration step whenever the DDL below changes.
-const schemaVersion = 1
+// migrations[i] brings a database at version i to version i+1, so a database at
+// any version between 0 and schemaVersion is brought current by replaying the
+// tail of this array.
+//
+// It is a replay log, not a picture of the current schema. Every entry is
+// frozen once it ships: a fresh database runs all of them in order, so a column
+// added to ddl AND to a later ALTER collides on the fresh path, while one added
+// to ddl alone leaves every already-created database behind — and the resulting
+// "no such column" is swallowed in a hook. Changes are appended, never edited.
+// TestMigrationsAreAppendOnly is what says so when someone tries.
+//
+// A migration that has to rebuild a table cannot be written naively here.
+// PRAGMA foreign_keys = OFF is a silent no-op inside the transaction migrate
+// holds, and ALTER TABLE ... RENAME with enforcement on rewrites the
+// REFERENCES messages(id) clauses the comment on ddl calls load-bearing.
+var migrations = [...]string{
+	ddl, // 0 -> 1
+	`ALTER TABLE messages ADD COLUMN listed_at INTEGER`, // 1 -> 2
+}
 
-// ddl creates the whole schema. Table order matters: a foreign key must name a
-// table that already exists, so messages (self-referential only) comes first,
-// then sessions (→ messages), then aliases (→ sessions).
+// schemaVersion is the user_version this binary expects. len of an array is a
+// compile-time constant, so this cannot drift from the log above — and a
+// refactor to a slice breaks the build rather than the invariant.
+const schemaVersion = len(migrations)
+
+// ddl creates the v1 schema, and is frozen at that: see migrations. Table order
+// matters: a foreign key must name a table that already exists, so messages
+// (self-referential only) comes first, then sessions (→ messages), then
+// aliases (→ sessions).
 //
 // The two foreign keys are not decoration — prune is required to skip rows that
 // are still referenced, and foreign_keys=ON is what makes a mistake there fail
@@ -124,24 +146,47 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
-	switch version {
-	case schemaVersion: // already current — another process won the race
-	case 0:
-		if _, err := conn.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("create schema: %w", err)
-		}
-		// PRAGMA takes no bound parameters, hence the format; schemaVersion is
-		// a compile-time constant so there is nothing to inject.
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-			return fmt.Errorf("set user_version: %w", err)
-		}
-	default:
-		return fmt.Errorf("database schema version %d is not supported by this binary (expected 0 or %d)", version, schemaVersion)
+	// Out of range is refused rather than replayed. Above schemaVersion a
+	// downgrade cannot know what changed; below zero there is no such version at
+	// all, and user_version is a signed field an outside writer can set, so this
+	// bound is what keeps a corrupt header out of migrations[-1] — a panic in a
+	// hook exits non-zero with a stack trace on a session's stderr.
+	if version < 0 || version > schemaVersion {
+		return fmt.Errorf("database schema version %d is not in the range this binary supports (0..%d)", version, schemaVersion)
+	}
+	if err := applyMigrations(ctx, conn, version, migrations[:]); err != nil {
+		return err
 	}
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	committed = true
+	return nil
+}
+
+// applyMigrations replays list from the version a database is already at, then
+// records the version it reached.
+//
+// Both halves run inside the caller's transaction, which is what makes the pair
+// all-or-nothing. Recording a version whose statements did not all succeed is
+// the one outcome nothing recovers from on its own: the next open would skip
+// the entries it believes already ran. It is a separate function so a test can
+// hand it a failing entry and check exactly that — see
+// TestAFailedMigrationLeavesTheVersionAlone.
+func applyMigrations(ctx context.Context, conn *sql.Conn, from int, list []string) error {
+	if from == len(list) {
+		return nil // already current — another process won the race
+	}
+	for v := from; v < len(list); v++ {
+		if _, err := conn.ExecContext(ctx, list[v]); err != nil {
+			return fmt.Errorf("migrate %d -> %d: %w", v, v+1, err)
+		}
+	}
+	// PRAGMA takes no bound parameters, hence the format; the operand is a
+	// length, so there is nothing to inject.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", len(list))); err != nil {
+		return fmt.Errorf("set user_version: %w", err)
+	}
 	return nil
 }

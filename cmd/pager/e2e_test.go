@@ -309,9 +309,15 @@ func TestAgoRendersCoarsely(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionUnchanged: automatic names were designed to need no schema
-// change, so a database written by the previous version keeps working and this
-// one must not quietly migrate it.
+// TestSchemaVersionUnchanged: migrate is the only thing that writes
+// user_version, so ordinary commands must leave it where they found it.
+//
+// It used to assert the literal 1, meaning "automatic names needed no schema
+// change". That reading died when migrate learned to upgrade an existing
+// database: pager now migrates one on open, by design, and a literal here would
+// have to be edited on every schema change. What is left is the weaker but
+// durable invariant — attach, a hook and who write no version of their own. The
+// version itself is owned by internal/store, where schemaVersion is visible.
 func TestSchemaVersionUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "msg.db")
@@ -319,20 +325,28 @@ func TestSchemaVersionUnchanged(t *testing.T) {
 	t.Setenv("PAGER_CLIENT", "none")
 
 	mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
+	baseline := schemaVersionOf(t, dbPath)
+
 	payload := `{"session_id":"s1","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
 	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
 	mustRun(t, "who")
 
+	if got := schemaVersionOf(t, dbPath); got != baseline {
+		t.Errorf("user_version = %d after ordinary commands, want the unchanged %d", got, baseline)
+	}
+}
+
+// schemaVersionOf reads the version a database reports.
+func schemaVersionOf(t *testing.T, dbPath string) int {
+	t.Helper()
 	st := openDB(t, dbPath)
 	var version int
 	if err := st.DB().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("read user_version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("user_version = %d, want the unchanged 1", version)
-	}
+	return version
 }
 
 // TestE2EReplyCarriesCausalDepth: the reply to a delivered message is not a
