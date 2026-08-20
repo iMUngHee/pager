@@ -12,6 +12,102 @@ import (
 
 // --- helpers -----------------------------------------------------------
 
+// TestExpiredCountMatchesTheExpiredListing closes a gap between two surfaces
+// that name each other. renderTail tells a session "N messages past the delivery
+// window and no longer sent automatically (`pager ls --expired`)", so the number
+// it prints has to be the number that command will show. Counting the two
+// differently would point a reader at a listing shorter than the count they were
+// just handed -- possibly empty.
+//
+// The fixture is what keeps this from passing vacuously. It needs a fresh
+// message, or Render returns "" at the Empty() guard and no tail is produced at
+// all; it needs an aged message nobody has read, so the count is not zero on
+// both sides; and it needs an aged message that WAS read, which is the row the
+// two sides used to disagree about. Concrete numbers are asserted rather than
+// equality, so a break says which side moved.
+//
+// The assertion reads Render's text, not batch.Expired. Reading the int would
+// leave renderTail unexecuted, and renderTail's expired branch had no coverage
+// at all before this test.
+func TestExpiredCountMatchesTheExpiredListing(t *testing.T) {
+	st, fake := newStore(t)
+	ctx := t.Context()
+	lim := DefaultLimits()
+	inboxSession(t, st, "B", "inboxB")
+
+	agedRead := queue(t, st, "inboxB", "@a", "aged, and an agent read it")
+	queue(t, st, "inboxB", "@a", "aged, and nobody read it")
+	if _, err := MarkListed(ctx, st, []int64{agedRead}); err != nil {
+		t.Fatalf("MarkListed: %v", err)
+	}
+	fake.Advance(lim.InjectTTL + time.Hour)
+	queue(t, st, "inboxB", "@a", "fresh, so the batch is not empty")
+
+	batch := collect(t, st, "B", lim)
+	if batch.Expired != 1 {
+		t.Errorf("batch.Expired = %d, want 1 — the read one must not be counted", batch.Expired)
+	}
+
+	listed, err := List(ctx, st, "B", FilterExpired, lim)
+	if err != nil {
+		t.Fatalf("List expired: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Errorf("`ls --expired` would show %d messages, want 1", len(listed))
+	}
+
+	// What the session is actually told. The count travels through renderTail,
+	// so this is the assertion that runs the branch.
+	rendered := Render(batch)
+	if want := "1 message past the delivery window"; !strings.Contains(rendered, want) {
+		t.Errorf("the hook text does not contain %q:\n%s", want, rendered)
+	}
+	if strings.Contains(rendered, "2 messages past the delivery window") {
+		t.Errorf("the hook counted the already-read message:\n%s", rendered)
+	}
+}
+
+// TestPolledMessageIsStillDelivered pins a contract that had no test: a message
+// an agent read by polling is still injected by the next hook run.
+//
+// This looks like duplicate delivery and is not. listed_at says someone looked
+// at the message; it does not say the message is in a context now, because the
+// context may have been compacted since. The candidate SELECT therefore reads
+// delivered_at alone, and this test is here so that a future reader who mistakes
+// the re-injection for a bug cannot "fix" it quietly.
+func TestPolledMessageIsStillDelivered(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	lim := DefaultLimits()
+	inboxSession(t, st, "B", "inboxB")
+
+	id := queue(t, st, "inboxB", "@a", "read by a poll, not yet injected")
+	if n, err := MarkListed(ctx, st, []int64{id}); err != nil || n != 1 {
+		t.Fatalf("MarkListed = (%d, %v), want (1, nil)", n, err)
+	}
+
+	batch := collect(t, st, "B", lim)
+	if len(batch.Messages) != 1 || batch.Messages[0].ID != id {
+		t.Fatalf("batch = %+v, want the polled message #%d — a poll must not "+
+			"suppress injection, because the context may have compacted since", batch.Messages, id)
+	}
+	if _, err := ConfirmDelivery(ctx, st, "B", batch.Token); err != nil {
+		t.Fatalf("ConfirmDelivery: %v", err)
+	}
+
+	// And now it carries both columns, which is the state the archive has to
+	// represent.
+	var delivered, listed sql.NullInt64
+	if err := st.DB().QueryRowContext(ctx,
+		"SELECT delivered_at, listed_at FROM messages WHERE id = ?", id).Scan(&delivered, &listed); err != nil {
+		t.Fatalf("read both columns: %v", err)
+	}
+	if !delivered.Valid || !listed.Valid {
+		t.Errorf("delivered_at valid = %v, listed_at valid = %v; want both set",
+			delivered.Valid, listed.Valid)
+	}
+}
+
 // inboxSession wires one session with one inbox, the minimum a recipient needs.
 func inboxSession(t *testing.T, st *store.Store, session, alias string) {
 	t.Helper()

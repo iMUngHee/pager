@@ -81,7 +81,7 @@ func (s *Server) register() {
 			mcp.WithDescription(
 				"List messages addressed to this session. Returns the whole history, delivered ones included, unless narrowed."),
 			mcp.WithBoolean("waiting",
-				mcp.Description("Show only messages not delivered yet — the cheap way to poll during a long turn, and usually empty.")),
+				mcp.Description("Show only messages nobody has dealt with yet — neither injected by a hook nor returned by an earlier listing. The cheap way to poll during a long turn, and usually empty.")),
 			mcp.WithBoolean("expired",
 				mcp.Description("Show only messages past the automatic delivery window — these are not retried and need resending by hand.")),
 		),
@@ -159,9 +159,34 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultText("nothing here"), nil
 	}
 
+	// This is the only place a read is recorded. deliver.List is shared with
+	// `pager ls`, which can be pointed at another session's inbox, so stamping
+	// there would let a person glancing at a queue consume an agent's mail.
+	// msg_list has no target argument at all, so this call can only ever mark
+	// what belongs to the caller.
+	var fresh []int64
+	for _, m := range messages {
+		if !m.Seen && !m.Delivered {
+			fresh = append(fresh, m.ID)
+		}
+	}
+	_, markErr := deliver.MarkListed(ctx, s.st, fresh)
+
+	// The rendering below reads the slice as it was scanned, before the stamp,
+	// so the listing that first surfaces a message still prints it as waiting
+	// and only a later one calls it seen. Recomputing the state after the write
+	// would be the other defensible choice, but it would mean a message is
+	// reported as already seen by the very response that is showing it.
 	var sb strings.Builder
 	for _, m := range messages {
 		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), m.Sender, m.Alias, m.Body)
+	}
+	// A failed stamp must not cost the caller its mail: it already has the
+	// messages in hand, and losing them to bookkeeping would be the worse
+	// outcome. Saying so is not optional either -- silence here would look
+	// exactly like a working poll while every later one repeated itself.
+	if markErr != nil {
+		fmt.Fprintf(&sb, "\nnote: could not record these as read (%v); they will be listed again\n", markErr)
 	}
 	return mcp.NewToolResultText(sb.String()), nil
 }
