@@ -122,14 +122,23 @@ codex  mcp add pager       -- pager mcp
 pager who                                # 지금 부를 수 있는 세션 목록
 pager send hica "파서 작업 넘긴다"         # 보내기
 pager ls                                 # 내 앞으로 온 것 (읽은 것까지 전부)
-pager ls --waiting                       # 아직 안 받은 것만 — 작업 중 확인용
-pager ls --expired                       # 자동 배달 창을 넘긴 것
+pager ls --waiting                       # 아무도 아직 안 챙긴 것만 — 작업 중 확인용
+pager ls --expired                       # 자동 배달 창을 넘겼고 아직 아무도 안 챙긴 것
 pager whoami                             # 내 세션과 내 이름
 pager alias review-box                   # 이름을 직접 고르기 (자동 이름을 대신한다)
 pager claim review-box                   # 오프라인 수신함 이어받기
 pager prune --dry-run                    # 보관 기한 지난 것 확인
 pager export > backup.jsonl              # 저장소 전체를 JSONL로
 ```
+
+**"챙겼다"는 두 가지를 함께 뜻한다.** 훅이 메시지를 세션 컨텍스트에 주입했거나(STATE `delivered`),
+에이전트가 MCP `msg_list`로 직접 들여다봤거나(STATE `seen`) — `--waiting`과 `--expired`는 둘 중
+어느 것도 없는 것만 낸다. 그래서 `--waiting`은 "**내가** 못 본 것"이 아니라 "**아무도** 아직 손대지
+않은 것"이다. `pager ls`는 무엇도 기록하지 않으므로(`ls --session`으로 남의 수신함을 들여다봐도
+그쪽 메일이 소비되지 않는다) 사람이 보는 목록은 이 구별과 무관하다.
+
+폴링으로 읽은 메시지도 **다음 턴에 훅이 다시 주입한다.** 중복이 아니라 의도다 — 그 사이 컨텍스트가
+압축됐을 수 있어서, "누가 봤다"와 "지금 컨텍스트에 있다"는 같은 말이 아니다.
 
 `pager attach`는 훅이 알아서 한다 — 훅을 등록하지 않고 손으로 쓸 때만 필요하다.
 

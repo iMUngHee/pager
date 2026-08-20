@@ -123,7 +123,7 @@ func TestRecordEncodingIsGolden(t *testing.T) {
 	}
 	want := `{"v":1,"id":7,"created_at":"2026-07-19T04:12:33.481Z","alias":"gupa",` +
 		`"sender_session":null,"sender_label":"human","origin":"human","cause_id":null,` +
-		`"hop":0,"delivered_at":null,"delivery_seq":null,` +
+		`"hop":0,"delivered_at":null,"delivery_seq":null,"listed_at":null,` +
 		`"body":"a <b> & \"c\"\n두 번째 줄"}` + "\n"
 
 	var first, second bytes.Buffer
@@ -174,7 +174,7 @@ func TestRecordContract(t *testing.T) {
 
 	wantKeys := []string{
 		"v", "id", "created_at", "alias", "sender_session", "sender_label",
-		"origin", "cause_id", "hop", "delivered_at", "delivery_seq", "body",
+		"origin", "cause_id", "hop", "delivered_at", "delivery_seq", "listed_at", "body",
 	}
 	for id, m := range byID {
 		// ① the key set is exact — neither a missing field nor a stray one.
@@ -616,6 +616,70 @@ func TestExportMatchesArchiveShape(t *testing.T) {
 
 	if archived != exported[0] {
 		t.Errorf("the same message encodes differently:\n archive: %s\n  export: %s", archived, exported[0])
+	}
+}
+
+// TestArchiveRecordsTheListedState covers the state an export would otherwise
+// lose: listed_at is not recoverable from any other field, so without it a
+// backup cannot tell a message nobody touched from one an agent read and left.
+//
+// The three cases are the whole invariant, and the middle one is the reason the
+// obvious shortcut is wrong. "A delivered row has listed_at NULL" is NOT true:
+// the hook deliberately re-injects a polled message, so polled-then-delivered is
+// an ordinary outcome and the row carries both columns. Asserting the shortcut
+// would have written a test that later traps correct behaviour.
+func TestArchiveRecordsTheListedState(t *testing.T) {
+	s, _ := newStore(t)
+
+	untouched := insertHuman(t, s, "nobody has looked at this", false)
+	polled := insertHuman(t, s, "an agent polled this", false)
+	polledThenDelivered := insertHuman(t, s, "polled, then a hook injected it", true)
+
+	stamp := s.Now()
+	if _, err := s.Exec(t.Context(),
+		"UPDATE messages SET listed_at = ? WHERE id IN (?, ?)",
+		stamp, polled, polledThenDelivered); err != nil {
+		t.Fatalf("stamp listed_at: %v", err)
+	}
+
+	byID := map[int64]map[string]any{}
+	for _, line := range exportLines(t, s) {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("record is not valid JSON: %v\n%s", err, line)
+		}
+		byID[int64(m["id"].(float64))] = m
+	}
+
+	for _, tc := range []struct {
+		name string
+		id   int64
+		want bool // listed_at is present
+	}{
+		{"never listed", untouched, false},
+		{"polled while waiting", polled, true},
+		{"polled, then delivered — carries both", polledThenDelivered, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok := byID[tc.id]
+			if !ok {
+				t.Fatalf("message #%d is missing from the export", tc.id)
+			}
+			if _, present := m["listed_at"]; !present {
+				t.Fatal("the record has no listed_at key at all")
+			}
+			got := m["listed_at"] != nil
+			if got != tc.want {
+				t.Errorf("listed_at present = %v, want %v (value %v)", got, tc.want, m["listed_at"])
+			}
+		})
+	}
+
+	// The both-columns row is the one worth stating outright: an export that kept
+	// only delivered_at would flatten it into the never-polled case.
+	if both := byID[polledThenDelivered]; both["delivered_at"] == nil || both["listed_at"] == nil {
+		t.Errorf("polled-then-delivered record lost an axis: delivered_at=%v listed_at=%v",
+			both["delivered_at"], both["listed_at"])
 	}
 }
 
