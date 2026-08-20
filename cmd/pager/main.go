@@ -234,20 +234,9 @@ func list(args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tINBOX\tFROM\tSTATE\tBODY")
 	for _, m := range messages {
-		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, m.Sender, state(m), firstLine(m.Body))
+		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, m.Sender, m.State(), firstLine(m.Body))
 	}
 	return tw.Flush()
-}
-
-func state(m deliver.Listed) string {
-	switch {
-	case m.Delivered:
-		return "delivered"
-	case m.Expired:
-		return "expired"
-	default:
-		return "waiting"
-	}
 }
 
 func firstLine(body string) string {

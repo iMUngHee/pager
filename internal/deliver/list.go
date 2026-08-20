@@ -18,10 +18,45 @@ type Listed struct {
 	Body      string
 	Hop       int
 	CreatedAt int64
+	// Delivered means a hook has injected this message into its recipient's
+	// context.
 	Delivered bool
+	// Seen means an agent pulled this message up in a listing of its own inbox.
+	//
+	// It is the other axis of having been read, and the two are independent:
+	// Delivered is what a hook pushed into a context, Seen is what an agent went
+	// and looked at. A message can be either, both, or neither.
+	Seen bool
 	// Expired means the message is past the injection window: it is still
 	// here, but it will not be delivered automatically again.
 	Expired bool
+}
+
+// State is the one word a listing prints for this message.
+//
+// The vocabulary lives here rather than in each caller because the flag names
+// are derived from it: `--waiting` and `--expired` are meant to be the value a
+// person just read in the STATE column. Two copies of this switch would let the
+// CLI and the MCP tool drift apart, and a drift is a broken promise rather than
+// a cosmetic difference.
+//
+// The order is the strength of the fact. delivered wins over seen because it is
+// the stronger claim — the message reached a context, not merely a listing — so
+// a row that is both prints delivered and the poll is only visible in the
+// column. That loses nothing a filter needs: both narrowing filters exclude the
+// row on either axis alone. Whether anyone has dealt with the message is the
+// question the labels answer, and both of the first two mean yes.
+func (l Listed) State() string {
+	switch {
+	case l.Delivered:
+		return "delivered"
+	case l.Seen:
+		return "seen"
+	case l.Expired:
+		return "expired"
+	default:
+		return "waiting"
+	}
 }
 
 // Filter narrows what List returns.
@@ -36,15 +71,27 @@ const (
 	// FilterAll returns every message addressed to the session, delivered ones
 	// included.
 	FilterAll Filter = iota
-	// FilterWaiting returns only what has not been delivered yet. This is what a
-	// poll during a long turn wants: the answer is usually empty, and the cost
-	// of asking should match what it finds rather than what has accumulated.
+	// FilterWaiting returns only what nobody has dealt with yet — neither
+	// injected by a hook nor looked at in a listing. This is what a poll during a
+	// long turn wants: the answer is usually empty, and the cost of asking should
+	// match what it finds rather than what has accumulated.
 	FilterWaiting
-	// FilterExpired returns exactly what automatic delivery has given up on:
-	// those messages are not lost, and listing them is how they get noticed and
-	// resent.
+	// FilterExpired returns exactly what automatic delivery has given up on and
+	// nobody has since looked at: those messages are not lost, and listing them
+	// is how they get noticed and resent. One that has been read by a poll needs
+	// no resending, so it is not here.
 	FilterExpired
 )
+
+// undealtWith is what both narrowing filters mean by "still needs someone".
+//
+// The two axes are independent — delivered_at is set only by a hook confirming
+// an injection, listed_at only by an agent pulling the message up in a listing
+// of its own inbox — so neither alone answers "has anyone dealt with this". Both
+// filters share this one clause rather than spelling it twice, because the
+// sharing IS the nesting invariant the Filter doc above states: narrow expired
+// with the same condition and expired ⊂ waiting holds by construction.
+const undealtWith = " AND m.delivered_at IS NULL AND m.listed_at IS NULL"
 
 // FilterFrom resolves the two narrowing flags the CLI and the MCP server each
 // expose.
@@ -68,15 +115,15 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 
 	query := `
 		SELECT m.id, m.alias, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at,
-		       m.delivered_at IS NOT NULL, m.created_at < ?
+		       m.delivered_at IS NOT NULL, m.listed_at IS NOT NULL, m.created_at < ?
 		  FROM messages m JOIN aliases a ON a.alias = m.alias
 		 WHERE a.session_id = ?`
 	args := []any{windowStart, session}
 	switch f {
 	case FilterWaiting:
-		query += " AND m.delivered_at IS NULL"
+		query += undealtWith
 	case FilterExpired:
-		query += " AND m.delivered_at IS NULL AND m.created_at < ?"
+		query += undealtWith + " AND m.created_at < ?"
 		args = append(args, windowStart)
 	}
 	query += " ORDER BY m.id"
@@ -90,12 +137,66 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 	var out []Listed
 	for rows.Next() {
 		var l Listed
-		if err := rows.Scan(&l.ID, &l.Alias, &l.Sender, &l.Body, &l.Hop, &l.CreatedAt, &l.Delivered, &l.Expired); err != nil {
+		if err := rows.Scan(&l.ID, &l.Alias, &l.Sender, &l.Body, &l.Hop, &l.CreatedAt,
+			&l.Delivered, &l.Seen, &l.Expired); err != nil {
 			return nil, fmt.Errorf("list messages: %w", err)
 		}
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+// MarkListed records that an agent pulled these messages up in a listing of its
+// own inbox, and reports how many rows that changed.
+//
+// Only the MCP handler calls this, and the boundary is deliberate rather than a
+// convention to remember: `pager ls --session <id>` can list another session's
+// inbox, so marking from the shared listing path would let a person glancing at
+// a queue consume an agent's mail. msg_list has no target argument at all — it
+// resolves its own session — so the MCP path can only ever stamp its own inbox.
+// List therefore stays a pure read.
+//
+// Two clauses shape what gets written. listed_at IS NULL keeps the first
+// sighting rather than the latest: the meaningful fact is when a message first
+// came into view, and keeping it makes the column monotone. delivered_at IS NULL
+// gives the column one crisp meaning — listed_at is set exactly when an agent
+// looked at a row that was still undelivered — and a row already delivered when
+// it was listed has no reader for the fact, since both narrowing filters exclude
+// it on delivered_at alone.
+//
+// Note what this does NOT promise: a row stamped here can still be delivered
+// afterwards, because the hook's candidate selection deliberately ignores
+// listed_at so a polled message is re-injected in case the context compacted.
+// Such a row carries both columns, and archives it with both.
+func MarkListed(ctx context.Context, st *store.Store, ids []int64) (int64, error) {
+	// SQLite accepts IN () and matches nothing, so this guard changes no
+	// observable behaviour — measured, not assumed. It is here to skip a round
+	// trip on the path this whole column exists for: a poll during a long turn
+	// whose inbox is already fully stamped. Claim guards the same way, so a
+	// caller does not have to know which of the two it is calling.
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, st.Now())
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	res, err := st.Exec(ctx, `
+		UPDATE messages SET listed_at = ?
+		 WHERE id IN (`+placeholders(len(ids))+`)
+		   AND listed_at IS NULL
+		   AND delivered_at IS NULL`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("mark listed: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("mark listed: %w", err)
+	}
+	return n, nil
 }
 
 // SenderLabel is how a sender is shown to its recipient.

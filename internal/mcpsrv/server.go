@@ -161,14 +161,7 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 
 	var sb strings.Builder
 	for _, m := range messages {
-		state := "waiting"
-		switch {
-		case m.Delivered:
-			state = "delivered"
-		case m.Expired:
-			state = "expired"
-		}
-		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, state, m.Sender, m.Alias, m.Body)
+		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), m.Sender, m.Alias, m.Body)
 	}
 	return mcp.NewToolResultText(sb.String()), nil
 }
