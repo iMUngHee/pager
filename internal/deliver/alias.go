@@ -284,6 +284,33 @@ type Orphan struct {
 	Pending int
 }
 
+// SessionWorkspace returns the root and tool stored against a session, or two
+// empty strings when no row exists yet.
+//
+// Callers pass the result to OrphanAliases, which matches an alias on exactly
+// this pair. Reading the stored row rather than whatever the caller holds is the
+// same rule workspaceKnown records for the naming path: a hook whose host
+// detection just failed carries an empty tool, but RecordSession leaves an
+// already-known value in place, so the session's workspace is still known even
+// though this particular invocation could not see it. Judging from the caller's
+// own record instead makes the orphan hint disappear for exactly as long as
+// detection keeps missing.
+//
+// A missing row is not an error for the same reason it is not one there: a
+// session that has never been recorded simply has no workspace, and the caller's
+// empty-string check already covers it.
+func SessionWorkspace(ctx context.Context, st *store.Store, session string) (root, tool string, err error) {
+	err = st.DB().QueryRowContext(ctx,
+		"SELECT root, tool FROM sessions WHERE session_id = ?", session).Scan(&root, &tool)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("read session workspace: %w", err)
+	}
+	return root, tool, nil
+}
+
 // OrphanAliases lists the orphans in one workspace.
 //
 // Undelivered mail is part of the definition on purpose. An alias whose session
