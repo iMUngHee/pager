@@ -391,6 +391,7 @@ func TestEmittedEventNameIsCanonical(t *testing.T) {
 // TestOrphanHintGatingIsCaseInsensitive: the other behaviour keyed on the event
 // name. Lowercase Stop must still suppress the hint.
 func TestOrphanHintGatingIsCaseInsensitive(t *testing.T) {
+	detectionOff(t)
 	st := newEnv(t)
 	orphanWorkspace(t, st)
 	seedInbox(t, st, "fresh", "claude", "fresh-inbox")
@@ -435,6 +436,19 @@ func TestConfirmsSoNothingIsDeliveredTwice(t *testing.T) {
 
 // --- orphan hint gating ------------------------------------------------
 
+// Every test that reaches the orphan hint pins detection off, and that is
+// load-bearing rather than tidiness. The fixtures seed tool="claude", and
+// RecordSession keeps a stored tool only when the incoming one is empty
+// (COALESCE(NULLIF(excluded.tool, ''), sessions.tool)), so a run whose ancestry
+// happens to be codex overwrites the seeded value with "codex" and the alias
+// stops matching its own workspace. Pinning detection off is what makes the
+// stored pair — the thing the hint is actually judged on — identical on a
+// laptop, under either host, and in CI.
+//
+// It is also what makes the two tests that assert silence mean anything: with a
+// tool stored, silence can only come from the event gate they are about, not
+// from a workspace pair that never resolved.
+
 // orphanWorkspace leaves an inbox with mail behind and no live holder.
 func orphanWorkspace(t *testing.T, st *store.Store) {
 	t.Helper()
@@ -449,6 +463,7 @@ func orphanWorkspace(t *testing.T, st *store.Store) {
 }
 
 func TestOrphanHintOnPromptOnlyOnce(t *testing.T) {
+	detectionOff(t)
 	st := newEnv(t)
 	orphanWorkspace(t, st)
 	seedInbox(t, st, "fresh", "claude", "fresh-inbox")
@@ -466,6 +481,7 @@ func TestOrphanHintOnPromptOnlyOnce(t *testing.T) {
 // conversation, so a hint with no message would buy an agent turn that
 // delivers nothing.
 func TestStopEventStaysSilentOnOrphansOnly(t *testing.T) {
+	detectionOff(t)
 	st := newEnv(t)
 	orphanWorkspace(t, st)
 	seedInbox(t, st, "fresh", "claude", "fresh-inbox")
@@ -489,8 +505,30 @@ func TestStopEventStillDeliversMessages(t *testing.T) {
 	}
 }
 
+// TestOrphanHintSurvivesFailedDetection is the regression test for the reason
+// any of this changed: eligibility is read from the stored session row, not from
+// whatever the hook's own detection managed to see.
+//
+// The session here never gets a tool from detection — it has one only because
+// something recorded it earlier, which is the state a real session is in every
+// time the ancestry walk misses. Before the fix the hint was skipped for the
+// whole of such an invocation while the naming path, judging the same question
+// from the stored row, carried on working.
+func TestOrphanHintSurvivesFailedDetection(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	orphanWorkspace(t, st)
+	seedSessionOnly(t, st, "fresh", "claude")
+
+	got := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("fresh", "hello")))
+	if !strings.Contains(got, "pager claim left-behind") {
+		t.Errorf("the hint was skipped even though the stored row knows the workspace:\n%s", got)
+	}
+}
+
 // TestSessionStartShowsOrphanHint covers the other event allowed to carry it.
 func TestSessionStartShowsOrphanHint(t *testing.T) {
+	detectionOff(t)
 	st := newEnv(t)
 	orphanWorkspace(t, st)
 	seedInbox(t, st, "fresh", "claude", "fresh-inbox")

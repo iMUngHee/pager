@@ -27,10 +27,16 @@ const (
 	envHostHelper  = "PAGER_TEST_HOST_HELPER"
 	envProbeHelper = "PAGER_TEST_PROBE_HELPER"
 	envSelfPath    = "PAGER_TEST_SELF"
+	envPinClient   = "PAGER_TEST_PIN_CLIENT"
 	resultPrefix   = "HOST_RESULT"
 )
 
-func TestDetectHostThroughShell(t *testing.T) {
+// runHostHarness builds the three-level ancestry — a process named "claude", a
+// shell, then a probe that calls Detect — and returns what the probe reported
+// plus the pid of the injected host. pin is the PAGER_CLIENT the probe runs
+// under.
+func runHostHarness(t *testing.T, pin string) (ok bool, client string, pid int, start int64, hostPid int) {
+	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skipf("procInfo is unsupported on %s", runtime.GOOS)
 	}
@@ -45,24 +51,59 @@ func TestDetectHostThroughShell(t *testing.T) {
 	copyExecutable(t, self, hostPath)
 
 	cmd := exec.Command(hostPath, "-test.run=^TestHostHelper$")
-	cmd.Env = append(os.Environ(), envHostHelper+"=1", envSelfPath+"="+self)
+	cmd.Env = append(os.Environ(),
+		envHostHelper+"=1", envSelfPath+"="+self, envPinClient+"="+pin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("host helper failed: %v\n%s", err, out)
 	}
 
-	ok, client, pid, start := parseResult(t, string(out))
+	ok, client, pid, start = parseResult(t, string(out))
+	return ok, client, pid, start, cmd.Process.Pid
+}
+
+func TestDetectHostThroughShell(t *testing.T) {
+	ok, client, pid, start, hostPid := runHostHarness(t, Claude)
 	if !ok {
-		t.Fatalf("Detect reported failure from under a claude-named host\n%s", out)
+		t.Fatal("Detect reported failure from under a claude-named host")
 	}
 	if client != Claude {
 		t.Errorf("client = %q, want %q", client, Claude)
 	}
-	if pid != cmd.Process.Pid {
-		t.Errorf("detected pid = %d, want the host process %d", pid, cmd.Process.Pid)
+	if pid != hostPid {
+		t.Errorf("detected pid = %d, want the host process %d", pid, hostPid)
 	}
 	if start == 0 {
 		t.Error("start token is 0; pid reuse would not be detectable")
+	}
+}
+
+// TestDetectPinRejectsNonCandidateHost exercises the walk in the failing
+// direction: a host named "claude" sits directly above the probe while
+// PAGER_CLIENT pins codex, so the one host the walk can actually see is not a
+// candidate and must not be accepted.
+//
+// The assertion is an invariant rather than a count, because the harness cannot
+// own the whole ancestry — the walk climbs up to maxWalkDepth levels and passes
+// straight through the injected host into whatever launched `go test`. Its
+// predecessor asserted that no codex is found at all, which is a fact about the
+// machine and not about the code: it held on CI and was false inside a real
+// Codex session. What is always true is that the pinned-out claude was rejected,
+// so that is what this checks — either nothing resolved, or something resolved
+// that is a codex somewhere above and is not the injected host.
+func TestDetectPinRejectsNonCandidateHost(t *testing.T) {
+	ok, client, pid, _, hostPid := runHostHarness(t, Codex)
+	if !ok {
+		if client != Unknown {
+			t.Errorf("client = %q, want %q when nothing resolved", client, Unknown)
+		}
+		return
+	}
+	if client != Codex {
+		t.Errorf("client = %q, want %q — only the pinned candidate may resolve", client, Codex)
+	}
+	if pid == hostPid {
+		t.Errorf("accepted the claude-named host %d while pinned to %q", hostPid, Codex)
 	}
 }
 
@@ -73,12 +114,16 @@ func TestHostHelper(t *testing.T) {
 		t.Skip("runs only when spawned by TestDetectHostThroughShell")
 	}
 	self := os.Getenv(envSelfPath)
+	pin := os.Getenv(envPinClient)
+	if pin == "" {
+		pin = Claude
+	}
 	cmd := exec.Command("/bin/sh", "-c", "'"+self+"' -test.run='^TestProbeHelper$'")
 	cmd.Env = append(os.Environ(),
 		envHostHelper+"=", // stop the recursion
 		envProbeHelper+"=1",
-		"PAGER_CLIENT="+Claude, // pin the label so the walk is deterministic
-		"PAGER_SESSION=",       // tier 2 must not leak in from the outer env
+		"PAGER_CLIENT="+pin, // pin the label so the walk is deterministic
+		"PAGER_SESSION=",    // tier 2 must not leak in from the outer env
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

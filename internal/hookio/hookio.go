@@ -114,7 +114,7 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 		}
 	}
 
-	text := collect(ctx, st, in.SessionID, rec.Root, rec.Tool, event)
+	text := collect(ctx, st, in.SessionID, event)
 	// The introduction goes first: it explains the name that the messages
 	// below it are addressed to.
 	if named {
@@ -146,7 +146,13 @@ type injection struct {
 // a Stop hook continues the conversation, so emitting a hint there would spend
 // an agent turn to deliver nothing — the session would wake up, read a
 // suggestion about an inbox, and have no message to act on.
-func collect(ctx context.Context, st *store.Store, session, root, tool, event string) injection {
+//
+// The workspace pair is read here rather than passed in, and read after the
+// event gate rather than before it. Reading it at all is what makes the hint
+// survive a failed detection — see deliver.SessionWorkspace. Reading it after
+// the gate is what keeps the two events that can never show a hint from paying
+// for the lookup.
+func collect(ctx context.Context, st *store.Store, session, event string) injection {
 	var out injection
 
 	batch, err := deliver.CollectBatch(ctx, st, session, deliver.LimitsFromEnv())
@@ -158,7 +164,8 @@ func collect(ctx context.Context, st *store.Store, session, root, tool, event st
 	if event != EventUserPromptSubmit && event != EventSessionStart {
 		return out
 	}
-	if root == "" || tool == "" {
+	root, tool, err := deliver.SessionWorkspace(ctx, st, session)
+	if err != nil || root == "" || tool == "" {
 		return out
 	}
 	orphans, err := deliver.OrphanAliases(ctx, st, root, tool, store.DefaultStale)

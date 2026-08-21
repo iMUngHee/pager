@@ -214,19 +214,7 @@ func TestDetectPinnedToUnknownClientFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDetectPinnedToAbsentClient exercises the real ancestry walk in the
-// failing direction. The test binary's ancestors are not named "codex", so
-// detection must terminate and report failure rather than guess.
-func TestDetectPinnedToAbsentClient(t *testing.T) {
-	t.Setenv("PAGER_CLIENT", "codex")
-	client, host, ok := Detect()
-	if ok {
-		t.Fatalf("detected a codex host from the test binary: %q %+v", client, host)
-	}
-	if client != Unknown {
-		t.Errorf("client = %q, want %q", client, Unknown)
-	}
-	if host.Valid() {
-		t.Errorf("host = %+v, want invalid", host)
-	}
-}
+// TestDetectPinnedToAbsentClient lives in hostbind_test.go, because asserting
+// that a *known* client is absent from the ancestry is only true if the ancestry
+// is controlled. Asserting it against whatever launched `go test` passed in CI
+// and failed under a real Codex session.
