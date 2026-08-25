@@ -225,6 +225,17 @@ func (c *claudeWaker) peerToken(sess *claudeSession) (string, error) {
 // claudeFrame builds the two newline-delimited lines the listener expects. The
 // auth line must come first; anything else on an unauthenticated connection is
 // dropped.
+//
+// `priority` is the host's own field, not something pager invented for it.
+// Read out of the 2.1.241 binary, it is declared `optional()` over
+// ["now","next","later"] roughly 2KB from `crossSessionInbound` — the same
+// module as the rest of this protocol. "now" is what a poke means: the point
+// of waking a session is that it stops waiting for its next turn.
+//
+// What the host does with the value is unmeasured, and this code does not
+// depend on the answer. The field being optional is the only property that
+// matters — a host that ignores it, or one that drops it in a later version,
+// leaves the poke exactly as effective as it would be without the field.
 func claudeFrame(token, body string) ([]byte, error) {
 	auth, err := json.Marshal(map[string]string{"type": "auth", "token": token})
 	if err != nil {

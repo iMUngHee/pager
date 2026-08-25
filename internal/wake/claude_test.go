@@ -231,6 +231,33 @@ func TestPokeAuthenticatesThenSends(t *testing.T) {
 	}
 }
 
+// TestClaudeFrameCarriesPriorityNow pins a field that nothing else here would
+// miss. The plan wrote the frame down as measured and this field was not in
+// it, so it reached the wire with no record of where it came from — see
+// claudeFrame for that record. Pinning it makes dropping or renaming it a
+// decision rather than a diff nobody reads.
+func TestClaudeFrameCarriesPriorityNow(t *testing.T) {
+	frame, err := claudeFrame("tok", "body")
+	if err != nil {
+		t.Fatalf("claudeFrame: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(string(frame), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("frame has %d lines, want 2 (auth, then the message)", len(lines))
+	}
+
+	var user struct {
+		Priority string `json:"priority"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &user); err != nil {
+		t.Fatalf("message line is not JSON: %v", err)
+	}
+	if user.Priority != "now" {
+		t.Errorf("priority = %q, want \"now\" — the host declares the field over [\"now\",\"next\",\"later\"]", user.Priority)
+	}
+}
+
 // TestMissingKeyFileIsRefused covers the one failure worth telling the sender
 // about. It is only meaningful after a connect: the socket, the key and the
 // record are written at three different moments, so a missing key on its own

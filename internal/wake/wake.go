@@ -190,12 +190,14 @@ func PokeBody(alias, label string) string {
 
 // Describe renders the outcome for a human, or "" when there is nothing to say.
 //
-// The wording avoids claiming the peer acted. Writing the frame is all this
-// process observed; the recipient's hook is what turns that into a delivery.
+// Every line here says what this process observed and stops there. Writing the
+// frame is the whole of that observation — there is no read step and the
+// host's receipt goes elsewhere — so no line may say what the peer then did.
+// TestDescribeDoesNotClaimThePeerActed pins the Woken line for that reason.
 func Describe(r Result, alias string) string {
 	switch r.Outcome {
 	case Woken:
-		return "poked " + alias + " (" + r.Via + ") — it picks the message up on that turn"
+		return "poked " + alias + " (" + r.Via + ") — written to its inbox; its own hook is what delivers"
 	case Refused:
 		return "note: " + alias + " has a live inbox but refused the poke (" + r.Via +
 			") — it will be delivered on its next activity. This usually means the host's messaging contract changed."

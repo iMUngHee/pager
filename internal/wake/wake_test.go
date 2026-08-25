@@ -205,15 +205,19 @@ func TestPokeBodyNamesRecordingReader(t *testing.T) {
 // TestDescribeDoesNotClaimThePeerActed holds the line D2 draws. Writing the
 // frame is all this process observes; the recipient's hook is what proves a
 // delivery.
+//
+// No test can read a sentence for its meaning, so this one pins the sentence
+// instead of screening it. Screening was the earlier shape — a blocklist of
+// "delivered", "read", "received" — and it passed "it picks the message up on
+// that turn", which claims the peer acts while using none of those words. A
+// pin cannot judge a reword either, but it puts every reword here, next to the
+// invariant, instead of letting one through unread.
 func TestDescribeDoesNotClaimThePeerActed(t *testing.T) {
-	line := Describe(Result{Outcome: Woken, Via: "uds"}, "niso")
+	const want = "poked niso (uds) — written to its inbox; its own hook is what delivers"
 
-	if line == "" {
-		t.Fatal("Describe(Woken) = empty, want a line naming the target")
-	}
-	for _, claim := range []string{"delivered", "read", "received"} {
-		if strings.Contains(strings.ToLower(line), claim) {
-			t.Errorf("Describe(Woken) = %q, must not claim %q — there is no read step", line, claim)
-		}
+	if got := Describe(Result{Outcome: Woken, Via: "uds"}, "niso"); got != want {
+		t.Errorf("Describe(Woken) = %q, want %q\n"+
+			"Reword freely, but only to something that still says what this process "+
+			"observed — a frame written — and not what the peer did with it.", got, want)
 	}
 }
