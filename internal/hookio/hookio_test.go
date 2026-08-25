@@ -419,6 +419,50 @@ func TestPromptlessEventDoesNotReset(t *testing.T) {
 	}
 }
 
+// TestPokeDoesNotResetCausal covers the case wake made reachable. A poke is
+// delivered through the host's message-injection path, so the hook sees a
+// non-empty prompt that no person typed — structurally identical to typed
+// input. Before the sentinel exclusion existed this reset the chain: measured
+// against a live session, one poke advanced the causal epoch and cleared the
+// inbound pointer, which would have billed the reply it prompted as
+// human-origin instead of caused.
+//
+// The turn must still deliver. Poking rather than carrying the body is the
+// whole design, and it is worthless if the poke suppresses the delivery it
+// exists to trigger.
+func TestPokeDoesNotResetCausal(t *testing.T) {
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "claude", "inbox")
+	queue(t, st, "inbox", "@a", "first")
+
+	// A real prompt ends whatever preceded it and leaves a representative.
+	run(t, EventUserPromptSubmit, claudePayload("s1", "go"))
+	if causalIsClear(t, st, "s1") {
+		t.Fatal("delivery did not establish a causal representative")
+	}
+
+	queue(t, st, "inbox", "@a", "second")
+	poke := "pager: new mail for inbox from @a. " + deliver.PokeSentinel +
+		" If it is not shown with this turn, run: msg_list"
+	body := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("s1", poke)))
+
+	if !strings.Contains(body, "second") {
+		t.Errorf("poke turn did not deliver the waiting message; injected = %q", body)
+	}
+
+	var epoch int64
+	if err := st.DB().QueryRowContext(t.Context(),
+		"SELECT causal_epoch FROM sessions WHERE session_id = ?", "s1").Scan(&epoch); err != nil {
+		t.Fatalf("read epoch: %v", err)
+	}
+	if epoch != 1 {
+		t.Errorf("causal_epoch = %d, want 1 — a poke must not end the exchange", epoch)
+	}
+	if causalIsClear(t, st, "s1") {
+		t.Error("poke cleared the causal representative")
+	}
+}
+
 // --- delivery bookkeeping ----------------------------------------------
 
 func TestConfirmsSoNothingIsDeliveredTwice(t *testing.T) {

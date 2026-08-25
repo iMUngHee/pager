@@ -188,17 +188,33 @@ func collect(ctx context.Context, st *store.Store, session, event string) inject
 // startsNewTurn reports whether this event represents a person taking the
 // conversation somewhere new.
 //
-// The test is structural: the event is UserPromptSubmit and the payload carries
-// a non-empty prompt. An automatic continuation — a host resuming itself after
-// a Stop hook wrote context — carries no prompt text of its own, so it does not
-// reset the chain and a reply it produces still counts as caused.
+// The test is structural: the event is UserPromptSubmit, the payload carries a
+// non-empty prompt, and that prompt is not one of pager's own wake pokes. An
+// automatic continuation — a host resuming itself after a Stop hook wrote
+// context — carries no prompt text of its own, so it does not reset the chain
+// and a reply it produces still counts as caused.
 //
-// This is the weakest link in the ping-pong defence. If a host ever synthesised
-// a non-empty prompt when resuming itself, chains would reset one step early
-// and depth would stop accumulating. The breaker, which counts rather than
-// reasons, is what still holds in that case.
+// The poke exclusion closes what used to be the weakest link here. The comment
+// this replaces warned that a host synthesising a non-empty prompt would reset
+// chains one step early; wake made that hypothetical real, because a poke is
+// delivered through the host's injection path and reaches the hook looking
+// exactly like typed input. Measured before the exclusion existed: one poke
+// moved the recipient's causal epoch and cleared its inbound pointer, so the
+// reply it prompted would have been billed as human-origin instead of caused.
+// Mail arriving is not a person taking the conversation somewhere new.
+//
+// A prompt that merely quotes the sentinel gets the same treatment. That is
+// self-limiting: keeping the chain intact bills replies against the tighter
+// per-pair budget, so there is nothing to gain by imitating the marker.
 func startsNewTurn(event string, in Input) bool {
-	return event == EventUserPromptSubmit && strings.TrimSpace(in.Prompt) != ""
+	if event != EventUserPromptSubmit {
+		return false
+	}
+	prompt := strings.TrimSpace(in.Prompt)
+	if prompt == "" {
+		return false
+	}
+	return !strings.Contains(prompt, deliver.PokeSentinel)
 }
 
 // canonicalEvent maps an event name onto its canonical spelling, ignoring case.
