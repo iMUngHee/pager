@@ -1,9 +1,11 @@
 // Command pager delivers messages between coding-agent sessions, across
 // projects and across tools.
 //
-// A sender leaves a message; the recipient sees it the next time their session
-// is active. Delivery happens inside the recipient's hook, so there is no
-// polling and no forced interruption.
+// A sender leaves a message; the recipient reads it when its session next
+// runs. Delivery happens inside the recipient's hook, so there is no polling
+// and no forced interruption. When the recipient is live and its host offers a
+// way in, the send also pokes it so that "next time" is now rather than
+// whenever its user types.
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 	"github.com/unghee/pager/internal/mcpsrv"
 	"github.com/unghee/pager/internal/sessionref"
 	"github.com/unghee/pager/internal/store"
+	"github.com/unghee/pager/internal/wake"
 )
 
 // command is one pager subcommand. This table is the single source of truth
@@ -131,6 +134,14 @@ func send(args []string) error {
 	fmt.Printf("sent #%d to %s (hop %d, %s)\n", sent.ID, found.Alias, sent.Hop, sent.Origin)
 	if found.SessionID == "" {
 		fmt.Printf("note: %s has no live session — it will be delivered when one claims the alias\n", found.Alias)
+		return nil
+	}
+
+	// The message is already stored, so nothing below can cost a delivery. A
+	// poke only decides whether the recipient reads it now or the next time it
+	// runs, which is why wake reports an outcome instead of returning an error.
+	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, *label)), found.Alias); line != "" {
+		fmt.Println(line)
 	}
 	return nil
 }

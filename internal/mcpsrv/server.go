@@ -19,6 +19,7 @@ import (
 	"github.com/unghee/pager/internal/deliver"
 	"github.com/unghee/pager/internal/sessionref"
 	"github.com/unghee/pager/internal/store"
+	"github.com/unghee/pager/internal/wake"
 )
 
 const (
@@ -138,6 +139,12 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	out := fmt.Sprintf("sent #%d to %s (hop %d, %s)", sent.ID, found.Alias, sent.Hop, sent.Origin)
 	if found.SessionID == "" {
 		out += "\nnote: no live session holds that alias yet; it will be delivered when one claims it"
+	} else if line := wake.Describe(
+		wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label)), found.Alias,
+	); line != "" {
+		// Reported, never fatal. The message is stored either way; a poke only
+		// moves when the recipient reads it.
+		out += "\n" + line
 	}
 	return mcp.NewToolResultText(out), nil
 }

@@ -13,9 +13,17 @@ import (
 // the ancestry walk on every call, so without this a test's outcome depends on
 // what launched `go test`. Only pinned when unset — see
 // internal/sessionref/hostpin_test.go for why that condition matters.
+//
+// Wake needs the same treatment for the same reason, one step further out: a
+// send now reaches for the surrounding host's sessions and can connect to a
+// live one. A test that woke a real session would be writing into someone's
+// conversation to check its own bookkeeping.
 func TestMain(m *testing.M) {
 	if os.Getenv("PAGER_CLIENT") == "" {
 		os.Setenv("PAGER_CLIENT", "none")
+	}
+	if os.Getenv("PAGER_WAKE") == "" {
+		os.Setenv("PAGER_WAKE", "off")
 	}
 	os.Exit(m.Run())
 }
