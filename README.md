@@ -30,8 +30,12 @@ codex 세션                        claude 세션
 **두드리기는 내용을 나르지 않는다.** poke 는 "메일 왔다" 한 줄이고, 배달은 언제나 훅이 한다.
 렌더링·예산·읽음 기록이 한 곳에만 있다는 뜻이고, 두드리기가 실패해도 잃는 것은 지연뿐이다.
 
-`pager send` 는 어느 길로 갔는지 말한다 — `poked <이름> (uds)` 또는
-`note: <이름> was not poked — it will be delivered on its next activity`.
+`pager send` 는 어느 길로 갔는지 말한다.
+
+```
+poked <이름> (uds) — written to its inbox; its own hook is what delivers
+note: <이름> was not poked — it will be delivered on its next activity
+```
 
 `woken` 은 **커널이 프레임을 받았다**는 뜻이지 상대가 돌았다는 뜻이 아니다. 이 경로에는 읽기
 단계가 없다. 실제로 닿았는지는 수신 측 `delivered_at` 이 답한다.
