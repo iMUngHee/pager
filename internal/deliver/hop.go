@@ -41,7 +41,9 @@ var (
 	// ErrUnattributed is the fail-closed default: a send that cannot say which
 	// session it came from is refused rather than recorded anonymously.
 	ErrUnattributed = errors.New("no session context: pass --session, set PAGER_SESSION, or assert --human")
-	// ErrHopExceeded means the causal chain reached MaxHop.
+	// ErrHopExceeded means the causal chain reached MaxHop. What it wraps names
+	// the remedy, because the reader is usually an agent deciding what to do
+	// next — see the message built at the refusal.
 	ErrHopExceeded = errors.New("causal chain is too deep")
 	// ErrBreakerOpen means a rate limit tripped.
 	ErrBreakerOpen = errors.New("send rate limit reached")
@@ -88,7 +90,20 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			return err
 		}
 		if hop > MaxHop {
-			return fmt.Errorf("%w: hop %d exceeds the limit of %d", ErrHopExceeded, hop, MaxHop)
+			// The remedy is spelled out because the reader is almost always an
+			// agent, and the count alone does not tell it what to do. Read as
+			// bare numbers this refusal looks like a bug in ordinary
+			// discussion, and it was reported as one: a session hit it, and
+			// told its operator pager was cutting normal technical exchange
+			// short. It is not — what is capped is a chain of agent replies
+			// with no person in it, which is the whole point of MaxHop, and the
+			// operator being told is the correct outcome rather than the
+			// symptom. Saying so is what turns a refusal into an instruction.
+			return fmt.Errorf(
+				"%w: hop %d exceeds the limit of %d — that many replies have passed with no person in them; "+
+					"report it to your user rather than retrying, since their next prompt starts a fresh chain, "+
+					"and --human is an operator's assertion rather than a way past this",
+				ErrHopExceeded, hop, MaxHop)
 		}
 		if err := checkBreaker(ctx, c, st.Now(), req, origin); err != nil {
 			return err
