@@ -83,7 +83,7 @@ const (
 	FilterExpired
 )
 
-// undealtWith is what both narrowing filters mean by "still needs someone".
+// undealtWith is what everything that says "waiting" means by it.
 //
 // The two axes are independent — delivered_at is set only by a hook confirming
 // an injection, listed_at only by an agent pulling the message up in a listing
@@ -91,7 +91,12 @@ const (
 // filters share this one clause rather than spelling it twice, because the
 // sharing IS the nesting invariant the Filter doc above states: narrow expired
 // with the same condition and expired ⊂ waiting holds by construction.
-const undealtWith = " AND m.delivered_at IS NULL AND m.listed_at IS NULL"
+//
+// Inboxes counts with it too, which is why it is a bare predicate rather than a
+// clause carrying its own " AND ": there it is the first condition in the WHERE.
+// Every caller therefore joins it explicitly. A whole-store count that drifted
+// from `ls --waiting` would be two answers to one question.
+const undealtWith = "m.delivered_at IS NULL AND m.listed_at IS NULL"
 
 // FilterFrom resolves the two narrowing flags the CLI and the MCP server each
 // expose.
@@ -121,9 +126,9 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 	args := []any{windowStart, session}
 	switch f {
 	case FilterWaiting:
-		query += undealtWith
+		query += " AND " + undealtWith
 	case FilterExpired:
-		query += undealtWith + " AND m.created_at < ?"
+		query += " AND " + undealtWith + " AND m.created_at < ?"
 		args = append(args, windowStart)
 	}
 	query += " ORDER BY m.id"

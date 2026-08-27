@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// procInfoSupported says this platform implements procInfo, so a failed lookup
+// means the process is gone rather than that nobody can tell. See Alive.
+const procInfoSupported = true
+
 // procInfo reads the parent pid, start token, and an identifying command string
 // for pid via sysctl.
 //
