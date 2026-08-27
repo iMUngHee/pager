@@ -185,6 +185,43 @@ func TestHopChain(t *testing.T) {
 	}
 }
 
+// TestHopRefusalNamesItsRemedy pins the sentence a blocked sender reads.
+//
+// It exists because the bare count was misread in the field: a session hit the
+// limit, read "hop 4 exceeds the limit of 3", and told its operator that pager
+// was cutting ordinary technical discussion short. That reading is wrong — what
+// is capped is a chain of agent replies with no person in it — but nothing in
+// the message said so, and an error whose correct response is "tell your user"
+// has to say that or it gets reported as a bug instead of acted on.
+//
+// Pinned rather than screened, on the same reasoning as
+// wake.TestDescribeDoesNotClaimThePeerActed: no test can read a sentence for
+// its meaning, and a keyword screen passes rewordings that lose it. A pin
+// cannot judge a reword either, but it brings every reword here, next to the
+// reason the sentence exists.
+func TestHopRefusalNamesItsRemedy(t *testing.T) {
+	st, _ := newStore(t)
+	twoSessions(t, st)
+
+	deep := insertRaw(t, st, "inboxA", MaxHop)
+	deliverAndConfirm(t, st, "A", "deep", deep)
+
+	_, err := Send(t.Context(), st, SendRequest{Alias: "inboxB", Body: "one too many", Sender: "A"})
+	if !errors.Is(err, ErrHopExceeded) {
+		t.Fatalf("err = %v, want ErrHopExceeded", err)
+	}
+
+	const want = "causal chain is too deep: hop 4 exceeds the limit of 3 — " +
+		"that many replies have passed with no person in them; " +
+		"report it to your user rather than retrying, since their next prompt starts a fresh chain, " +
+		"and --human is an operator's assertion rather than a way past this"
+	if got := err.Error(); got != want {
+		t.Errorf("Send error = %q\nwant %q\n"+
+			"Reword freely, but only to something that still tells the reader to surface this "+
+			"to a person, and still refuses --human as the way around it.", got, want)
+	}
+}
+
 // TestHopResetsAfterUserPrompt is the escape hatch that keeps ordinary work
 // from silting up: once the user speaks, the session's next send starts over.
 func TestHopResetsAfterUserPrompt(t *testing.T) {
