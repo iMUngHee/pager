@@ -181,3 +181,49 @@ func copyExecutable(t *testing.T, src, dst string) {
 		t.Fatalf("close %s: %v", dst, err)
 	}
 }
+
+// TestAliveSeparatesGoneFromUnknowable is the contract Alive exists for: three
+// answers, not two.
+//
+// The recycled-pid case is the reason the start token is compared at all, and it
+// is checked here by asking about this very process with a token that is one off
+// — a pid that is unquestionably in use, whose instance is still not the one
+// recorded. A liveness check built on `kill -0` cannot tell those apart, which is
+// what a consumer doing its own process check gets wrong.
+func TestAliveSeparatesGoneFromUnknowable(t *testing.T) {
+	if !procInfoSupported {
+		t.Skip("this platform cannot read process info, so every answer is unknown")
+	}
+	_, start, _, ok := procInfo(os.Getpid())
+	if !ok {
+		t.Fatalf("procInfo on the test process itself failed")
+	}
+
+	// A process that has certainly exited. Its pid may be recycled later, but
+	// then its start token differs and the answer is still "not the one we
+	// recorded" — the same expectation either way.
+	dead := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := dead.Run(); err != nil {
+		t.Fatalf("run throwaway process: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		inst         Instance
+		alive, known bool
+	}{
+		{"this process", Instance{Pid: os.Getpid(), Start: start}, true, true},
+		{"a recycled pid", Instance{Pid: os.Getpid(), Start: start + 1}, false, true},
+		{"a process that exited", Instance{Pid: dead.Process.Pid, Start: start}, false, true},
+		{"no host was ever detected", Instance{}, false, false},
+		{"pid 1 is not a host", Instance{Pid: 1, Start: start}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alive, known := Alive(tc.inst)
+			if alive != tc.alive || known != tc.known {
+				t.Errorf("Alive(%+v) = (%t, %t), want (%t, %t)",
+					tc.inst, alive, known, tc.alive, tc.known)
+			}
+		})
+	}
+}

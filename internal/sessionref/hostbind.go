@@ -32,6 +32,34 @@ type Instance struct {
 // Valid reports whether the instance names a real, non-root process.
 func (i Instance) Valid() bool { return i.Pid > 1 }
 
+// Alive reports whether inst still names the process it was recorded for, and
+// whether this platform can answer the question at all.
+//
+// The start token is what makes this worth doing here rather than in a caller:
+// `kill -0 <pid>` says only that some process holds the number, so a recycled
+// pid reads as the original still running. Comparing the token is the check
+// Instance's doc comment says the field exists for.
+//
+// known is the difference between "no" and "cannot tell", and the two must not
+// collapse. A caller acts on them differently — mail addressed to an inbox whose
+// process is definitely gone is stranded, while mail whose process cannot be
+// checked is merely unverified, and hiding the second on the strength of the
+// first drops notifications nobody has abandoned. An instance that was never
+// detected (Valid is false) is unknowable for the same reason: there is no pid
+// to ask about.
+func Alive(inst Instance) (alive, known bool) {
+	if !inst.Valid() || !procInfoSupported {
+		return false, false
+	}
+	_, start, _, ok := procInfo(inst.Pid)
+	if !ok {
+		// The platform can answer and its answer is that no such process
+		// exists. That is a definite no, not an absence of information.
+		return false, true
+	}
+	return start == inst.Start, true
+}
+
 // Normalize maps the accepted spellings of a host label onto the stable one.
 func Normalize(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {

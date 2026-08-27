@@ -42,6 +42,7 @@ var commands = []command{
 	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
 	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
 	{"ls", "[--waiting] [--expired] [--session <id>]", "List messages addressed to this session", list},
+	{"inbox", "", "List every inbox with mail waiting in it", inbox},
 	{"who", "", "List the sessions that can be paged right now", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"export", "", "Write every stored message to stdout as JSONL", export},
@@ -248,6 +249,92 @@ func list(args []string) error {
 		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, m.Sender, m.State(), firstLine(m.Body))
 	}
 	return tw.Flush()
+}
+
+// inbox shows every inbox with mail waiting in it, across the whole store.
+//
+// It resolves no session, and that is the point: `ls` answers "what is
+// addressed to me", this answers "who is waiting on mail right now". Nothing
+// did — List is scoped to one session, who counts nothing, and export dumps
+// delivered mail too — so a caller wanting the global picture had to run one
+// command per session, which is too expensive at the refresh rate a
+// notification needs. The tmux status badge in ~/.config read pager's SQLite
+// tables directly instead, which is a dependency on names this project is free
+// to change. These three columns are what replaces it.
+func inbox(args []string) error {
+	fs := flag.NewFlagSet("inbox", flag.ContinueOnError)
+	if err := fs.Parse(permute(fs, args)); err != nil {
+		return err
+	}
+	// Refused rather than ignored, on export's reasoning: silently listing
+	// everything in response to `pager inbox --live` would look like the flag
+	// worked.
+	if fs.NArg() > 0 {
+		return fmt.Errorf("inbox takes no arguments (got %q)", fs.Arg(0))
+	}
+
+	ctx := context.Background()
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	boxes, err := deliver.Inboxes(ctx, st)
+	if err != nil {
+		return err
+	}
+	if len(boxes) == 0 {
+		fmt.Println("nothing waiting")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "INBOX\tWAITING\tHOST")
+	for _, b := range boxes {
+		fmt.Fprintf(tw, "%s\t%d\t%s\n", b.Alias, b.Waiting,
+			hostState(sessionref.Alive(sessionref.Instance{Pid: b.HostPid, Start: b.HostStart})))
+	}
+	return tw.Flush()
+}
+
+// hostState names what a liveness probe found, in the one word the HOST column
+// prints.
+//
+// It takes the probe's answer rather than making the call itself so that every
+// branch is reachable from a test: "live" needs a process that really is running
+// under the exact start token recorded for it, which a unit test cannot conjure
+// but a caller can hand over.
+//
+// It reports; it does not filter. Whether to hide an inbox nobody is behind is
+// a policy of whatever is displaying this — a notification drops it, an audit
+// wants exactly those — and answering the question is all pager can do that its
+// callers cannot.
+//
+// "unknown" is a third answer, not a soft "gone". It covers an inbox with no
+// recorded host process at all, which happens when detection failed at attach
+// time or when the alias has outlived its session; nothing has been learned
+// about that mail, so calling it abandoned would tell a caller to hide a live
+// notification.
+//
+// Note what this deliberately does not use: heartbeat_at. It only advances when
+// a hook runs, and hooks run at turn boundaries, so a session in the middle of a
+// long turn looks stale while it is working fine — measured at 7 minutes stale
+// on a live session. `who` uses it to answer a different question, "have I heard
+// from this session lately", and that is the question it is good for.
+//
+// This switch lives here rather than in deliver because there is one consumer.
+// The moment there are two — an MCP tool asking the same thing — it moves, on
+// the reasoning Listed.State's comment gives: two copies of a vocabulary drift.
+func hostState(alive, known bool) string {
+	switch {
+	case !known:
+		return "unknown"
+	case alive:
+		return "live"
+	default:
+		return "gone"
+	}
 }
 
 func firstLine(body string) string {

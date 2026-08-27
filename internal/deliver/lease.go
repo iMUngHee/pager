@@ -181,7 +181,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	var expired int
 	if err := st.DB().QueryRowContext(ctx, `
 		SELECT count(*) FROM messages m JOIN aliases a ON a.alias = m.alias
-		 WHERE a.session_id = ?`+undealtWith+` AND m.created_at < ?`,
+		 WHERE a.session_id = ? AND `+undealtWith+` AND m.created_at < ?`,
 		session, windowStart).Scan(&expired); err != nil {
 		return nil, 0, fmt.Errorf("count expired: %w", err)
 	}

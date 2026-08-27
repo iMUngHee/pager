@@ -713,3 +713,114 @@ func TestE2EUnknownAndAmbiguousTargets(t *testing.T) {
 		t.Errorf("the error does not list the candidates: %v", err)
 	}
 }
+
+// TestE2EInboxReportsEveryWaitingInbox is the whole-store question nothing used
+// to answer: `ls` is scoped to one session, so learning who is waiting meant one
+// call per session or reading the tables directly.
+//
+// PAGER_CLIENT is pinned to a non-candidate so host detection fails the same way
+// on every machine. That is what makes the HOST column deterministic here — the
+// test binary is itself a descendant of whatever agent ran `go test`, so an
+// unpinned run would find a real live host and the expected word would depend on
+// who was running the suite.
+func TestE2EInboxReportsEveryWaitingInbox(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+
+	if out := mustRun(t, "inbox"); !strings.Contains(out, "nothing waiting") {
+		t.Errorf("an empty store did not say so:\n%s", out)
+	}
+
+	for _, s := range []struct{ session, box string }{{"a", "a-box"}, {"b", "b-box"}} {
+		mustRun(t, "attach", "--session", s.session, "--tool", "claude", "--root", dir)
+		mustRun(t, "alias", "--session", s.session, s.box)
+	}
+	mustRun(t, "send", "--human", "a-box", "one for a")
+	mustRun(t, "send", "--human", "a-box", "two for a")
+	mustRun(t, "send", "--human", "b-box", "one for b")
+
+	out := mustRun(t, "inbox")
+	if !strings.Contains(out, "INBOX") || !strings.Contains(out, "WAITING") || !strings.Contains(out, "HOST") {
+		t.Fatalf("the header is not the three documented columns:\n%s", out)
+	}
+	// Counts per inbox, and no cross-contamination between them.
+	for _, want := range []string{"a-box", "b-box"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if got := inboxRow(t, out, "a-box"); got[1] != "2" {
+		t.Errorf("a-box waiting = %q, want 2:\n%s", got[1], out)
+	}
+	if got := inboxRow(t, out, "b-box"); got[1] != "1" {
+		t.Errorf("b-box waiting = %q, want 1:\n%s", got[1], out)
+	}
+	// No host was detected, which is not the same as the process being gone.
+	if got := inboxRow(t, out, "a-box"); got[2] != "unknown" {
+		t.Errorf("a-box host = %q, want unknown when detection never ran:\n%s", got[2], out)
+	}
+
+	// Delivering a-box's mail must take it off the listing entirely, since the
+	// count means waiting and nothing is waiting there any more.
+	payload := `{"session_id":"a","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"anything?"}`
+	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	out = mustRun(t, "inbox")
+	if strings.Contains(out, "a-box") {
+		t.Errorf("a delivered inbox is still listed as waiting:\n%s", out)
+	}
+	if !strings.Contains(out, "b-box") {
+		t.Errorf("an untouched inbox vanished:\n%s", out)
+	}
+}
+
+// inboxRow returns the whitespace-separated fields of the row for alias.
+func inboxRow(t *testing.T, out, alias string) []string {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == alias {
+			return fields
+		}
+	}
+	t.Fatalf("no row for %q in:\n%s", alias, out)
+	return nil
+}
+
+// TestE2EInboxRejectsArguments follows export: quietly listing everything in
+// response to a flag that does not exist would look like the flag worked.
+func TestE2EInboxRejectsArguments(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+
+	if _, err := capture(t, "", "inbox", "b-box"); err == nil {
+		t.Error("inbox accepted a positional argument")
+	}
+	if _, err := capture(t, "", "inbox", "--live"); err == nil {
+		t.Error("inbox accepted an undefined flag")
+	}
+}
+
+// TestHostStateSeparatesGoneFromUnknown fixes the mapping the HOST column
+// publishes. The pair the probe cannot produce — not alive, not known — is here
+// too: a caller reading "gone" hides mail, and nothing unknowable may reach that
+// word by an accident of switch order.
+func TestHostStateSeparatesGoneFromUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		alive, known bool
+		want         string
+	}{
+		{true, true, "live"},
+		{false, true, "gone"},
+		{false, false, "unknown"},
+		{true, false, "unknown"},
+	} {
+		if got := hostState(tc.alive, tc.known); got != tc.want {
+			t.Errorf("hostState(alive=%t, known=%t) = %q, want %q",
+				tc.alive, tc.known, got, tc.want)
+		}
+	}
+}

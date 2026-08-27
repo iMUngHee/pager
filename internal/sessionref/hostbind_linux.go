@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// procInfoSupported says this platform implements procInfo, so a failed lookup
+// means the process is gone rather than that nobody can tell. See Alive.
+const procInfoSupported = true
+
 // procInfo reads the parent pid, start token (starttime in clock ticks, which
 // every reader on the machine sees identically), and comm plus argv0 from
 // /proc/<pid>.
