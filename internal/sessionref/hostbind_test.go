@@ -227,3 +227,30 @@ func TestAliveSeparatesGoneFromUnknowable(t *testing.T) {
 		})
 	}
 }
+
+// TestAliveAtMatchesAlive keeps the adapter honest. It exists only to spare its
+// callers rebuilding an Instance, so the one thing it must never do is answer
+// differently from what it wraps.
+func TestAliveAtMatchesAlive(t *testing.T) {
+	if !procInfoSupported {
+		t.Skip("this platform cannot read process info, so every answer is unknown")
+	}
+	_, start, _, ok := procInfo(os.Getpid())
+	if !ok {
+		t.Fatalf("procInfo on the test process itself failed")
+	}
+
+	for _, inst := range []Instance{
+		{Pid: os.Getpid(), Start: start},
+		{Pid: os.Getpid(), Start: start + 1},
+		{},
+		{Pid: 1, Start: start},
+	} {
+		wantAlive, wantKnown := Alive(inst)
+		alive, known := AliveAt(inst.Pid, inst.Start)
+		if alive != wantAlive || known != wantKnown {
+			t.Errorf("AliveAt(%d, %d) = (%t, %t), want Alive's (%t, %t)",
+				inst.Pid, inst.Start, alive, known, wantAlive, wantKnown)
+		}
+	}
+}

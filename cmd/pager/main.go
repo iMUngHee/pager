@@ -133,8 +133,17 @@ func send(args []string) error {
 		return err
 	}
 	fmt.Printf("sent #%d to %s (hop %d, %s)\n", sent.ID, found.Alias, sent.Hop, sent.Origin)
-	if found.SessionID == "" {
-		fmt.Printf("note: %s has no live session — it will be delivered when one claims the alias\n", found.Alias)
+
+	// Who is behind the name decides whether poking it means anything. A
+	// stranded holder cannot answer a poke, and telling the sender it "will be
+	// delivered on its next activity" — which is what wake says of anything it
+	// could not reach — promises an activity that is not coming.
+	presence, err := deliver.PresenceOf(ctx, st, found, sessionref.AliveAt)
+	if err != nil {
+		return err
+	}
+	if line := presence.Note(found.Alias); line != "" {
+		fmt.Println(line)
 		return nil
 	}
 

@@ -60,6 +60,16 @@ func Alive(inst Instance) (alive, known bool) {
 	return start == inst.Start, true
 }
 
+// AliveAt is Alive for a caller holding the two columns rather than an Instance.
+//
+// The store keeps host_pid and host_start as separate values, so every caller
+// reading a session out of the database has the pair and not the struct. This
+// exists so they do not each rebuild it: deliver.HostProbe is written in terms
+// of the pair precisely so that deliver never has to name a sessionref type.
+func AliveAt(pid int, start int64) (alive, known bool) {
+	return Alive(Instance{Pid: pid, Start: start})
+}
+
 // Normalize maps the accepted spellings of a host label onto the stable one.
 func Normalize(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {

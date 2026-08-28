@@ -40,6 +40,27 @@ note: <이름> was not poked — it will be delivered on its next activity
 `woken` 은 **커널이 프레임을 받았다**는 뜻이지 상대가 돌았다는 뜻이 아니다. 이 경로에는 읽기
 단계가 없다. 실제로 닿았는지는 수신 측 `delivered_at` 이 답한다.
 
+### 이름 뒤에 아무도 없을 때
+
+두드리기 결과보다 **먼저** 확인하는 것이 있다. 그 이름을 들고 있는 세션의 프로세스가 아직 도는가.
+
+```
+note: <이름>'s session is gone — the message waits, but nothing will read it
+      until a session in that workspace claims the name; pager who lists who can answer now
+```
+
+별칭은 세션보다 오래 산다 — 그게 인계를 가능하게 하는 성질이다. 그래서 죽은 수신함도 이름이
+멀쩡히 해석되고, 발신자는 누군가 있다고 믿는다. 이때 두드리기 결과만 내면
+`was not poked — it will be delivered on its next activity` 가 나오는데, **다음 활동이 없다.**
+큐에 대해서는 참이고 독자에 대해서는 거짓인 문장이라, 아무도 없는 바로 그 순간에 안심시킨다.
+
+판정은 **pid + 프로세스 시작 토큰**으로 한다(`sessionref.Alive`). heartbeat 가 아니다 —
+`pager inbox` 의 `HOST` 컬럼과 같은 이유다. 그리고 **호스트를 확인할 수 없을 때는 "없다"고 하지
+않는다.** 붙을 때 호스트 탐지가 실패한 세션은 죽은 게 아니라 모르는 것이고, 근거 없이 부재를
+주장하면 살아있는 알림을 숨기게 된다. 확실할 때만 이 줄이 나온다.
+
+CLI 와 MCP `msg_send` 는 **같은 문장**을 낸다. 문장은 `deliver.Presence.Note` 한 곳에서 온다.
+
 ## 보장 — 조건부다
 
 이름을 "at-least-once"라고 부르지 않는 이유가 있다. 아래 전제가 깨지면 **출력 시도는 0회**일 수 있다.
