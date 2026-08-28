@@ -6,8 +6,20 @@ import (
 	"github.com/unghee/pager/internal/store"
 )
 
-// orphanAlias writes an alias whose holder is NULL, which SetAlias cannot
-// produce and the store reaches only by an alias outliving its session.
+// orphanAlias writes an alias whose holder is NULL, which no code path
+// produces.
+//
+// An earlier version of this comment said the store reaches it "by an alias
+// outliving its session". That is wrong, and pager-stale-holder-send-notice is
+// the item that exists because it is wrong: an alias outliving its session
+// keeps its session_id, which is exactly why a dead inbox still resolves and
+// still looks ordinary. Both alias INSERTs take session_id from the sessions
+// primary key, ClaimAlias only writes a non-empty session, nothing NULLs the
+// column, and nothing deletes a session row.
+//
+// The LEFT JOIN this covers is still worth covering — the schema permits the
+// state and a query has to answer for it — but do not read this helper as
+// evidence the state occurs.
 func orphanAlias(t *testing.T, st *store.Store, alias string) {
 	t.Helper()
 	if _, err := st.DB().ExecContext(t.Context(), `
