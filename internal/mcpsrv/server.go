@@ -137,8 +137,16 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 
 	out := fmt.Sprintf("sent #%d to %s (hop %d, %s)", sent.ID, found.Alias, sent.Hop, sent.Origin)
-	if found.SessionID == "" {
-		out += "\nnote: no live session holds that alias yet; it will be delivered when one claims it"
+
+	// Same question, same sentence as the CLI. It used to be answered here in
+	// wording of its own, and the two drifted precisely because the branch was
+	// unreachable and so nobody read either copy.
+	presence, err := deliver.PresenceOf(ctx, s.st, found, sessionref.AliveAt)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if line := presence.Note(found.Alias); line != "" {
+		out += "\n" + line
 	} else if line := wake.Describe(
 		wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label)), found.Alias,
 	); line != "" {

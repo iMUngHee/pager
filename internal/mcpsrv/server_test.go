@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -421,5 +422,51 @@ func TestSendRejectsEmptyArguments(t *testing.T) {
 	})
 	if !isError(t, resp) {
 		t.Error("an empty body was accepted")
+	}
+}
+
+// TestSendReportsAStrandedHolder pins that msg_send says the same thing the CLI
+// says.
+//
+// It is the regression guard for a drift that already happened: this path and
+// cmd/pager each carried their own wording for the recipient-absent case, and
+// they diverged because the branch was unreachable, so neither copy was ever
+// read. One Note is now the only source of the sentence, and this test is what
+// notices if a second one appears.
+func TestSendReportsAStrandedHolder(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "sender-session", "sender-box")
+	seed(t, st, "gone-session", "gone-box")
+	t.Setenv("PAGER_SESSION", "sender-session")
+	// Wake runs for real against an empty HOME, so the "was not poked" line is
+	// reachable and its absence below is evidence rather than a pinned-off no-op.
+	t.Setenv("PAGER_WAKE", "on")
+	t.Setenv("HOME", t.TempDir())
+
+	// A process that has certainly exited, bound as the holder's host.
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run throwaway process: %v", err)
+	}
+	if _, err := st.Exec(t.Context(),
+		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
+		cmd.Process.Pid, 1, "gone-session"); err != nil {
+		t.Fatalf("bind a dead host: %v", err)
+	}
+
+	s := start(t, st)
+	resp := s.call(2, "tools/call", map[string]any{
+		"name":      "msg_send",
+		"arguments": map[string]any{"target": "gone-box", "body": "anyone there?"},
+	})
+	if isError(t, resp) {
+		t.Fatalf("msg_send failed: %s", text(t, resp))
+	}
+	got := text(t, resp)
+	if want := deliver.PresenceStranded.Note("gone-box"); !strings.Contains(got, want) {
+		t.Errorf("msg_send result:\n%s\ndoes not contain the shared note:\n%s", got, want)
+	}
+	if strings.Contains(got, "was not poked") {
+		t.Errorf("msg_send still reported the poke outcome for a dead holder:\n%s", got)
 	}
 }

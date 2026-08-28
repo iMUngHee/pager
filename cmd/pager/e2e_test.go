@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -822,5 +823,92 @@ func TestHostStateSeparatesGoneFromUnknown(t *testing.T) {
 			t.Errorf("hostState(alive=%t, known=%t) = %q, want %q",
 				tc.alive, tc.known, got, tc.want)
 		}
+	}
+}
+
+// deadPid returns a pid whose process has certainly exited.
+//
+// Its number may be recycled later, but then the start token recorded against
+// it no longer matches and the probe still answers "not the one we recorded" —
+// which is the same verdict this test wants, by either route.
+func deadPid(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run throwaway process: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+// TestE2ESendToStrandedHolderSaysNobodyIsThere is the defect this closes.
+//
+// Automatic naming made the common shape different from the one the old notice
+// was written for: the holder row outlives its session, so a dead inbox still
+// resolves with a session id and the notice never fired. What fired instead was
+// wake's "it will be delivered on its next activity" — true of a queue, false
+// of a reader, and read as reassurance at exactly the moment nobody was there.
+func TestE2ESendToStrandedHolderSaysNobodyIsThere(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_CLIENT", "none")
+	// Wake runs for real, with HOME pointing at an empty directory so both
+	// adapters look for their surfaces and find none — the same arrangement
+	// TestSendSurvivesWakeFailure uses. Pinned off, the "was not poked" line
+	// could never appear and the assertion below would prove nothing.
+	t.Setenv("PAGER_WAKE", "on")
+	t.Setenv("HOME", t.TempDir())
+
+	mustRun(t, "attach", "--session", "gone-session", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "gone-session", "gone-box")
+
+	// Bind the holder to a process that has exited. attach could not do this:
+	// host detection is pinned off so the session carries no host at all, which
+	// is the "cannot tell" case rather than this one.
+	st := openDB(t, dbPath)
+	if _, err := st.Exec(t.Context(),
+		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
+		deadPid(t), 1, "gone-session"); err != nil {
+		t.Fatalf("bind a dead host: %v", err)
+	}
+
+	out := mustRun(t, "send", "--human", "gone-box", "anyone there?")
+	if !strings.Contains(out, "gone-box's session is gone") {
+		t.Errorf("send did not say the holder is gone:\n%s", out)
+	}
+	if strings.Contains(out, "was not poked") {
+		t.Errorf("send still reported the poke outcome, which promises an activity "+
+			"that is not coming:\n%s", out)
+	}
+	// The message is stored either way — the notice is about who will read it,
+	// not about whether the send worked.
+	if !strings.Contains(out, "sent #1 to gone-box") {
+		t.Errorf("the send itself did not report success:\n%s", out)
+	}
+	if listed := mustRun(t, "ls", "--session", "gone-session"); !strings.Contains(listed, "anyone there?") {
+		t.Errorf("the message was not stored:\n%s", listed)
+	}
+}
+
+// TestE2ESendToUncheckableHolderKeepsTheOldBehaviour is the other half, and the
+// one a wrong implementation breaks silently. A session with no recorded host
+// has not been shown to be gone, so it must still be treated as possibly there.
+func TestE2ESendToUncheckableHolderKeepsTheOldBehaviour(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+	// Wake runs for real, with HOME pointing at an empty directory so both
+	// adapters look for their surfaces and find none — the same arrangement
+	// TestSendSurvivesWakeFailure uses. Pinned off, the "was not poked" line
+	// could never appear and the assertion below would prove nothing.
+	t.Setenv("PAGER_WAKE", "on")
+	t.Setenv("HOME", t.TempDir())
+
+	mustRun(t, "attach", "--session", "unknown-session", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "unknown-session", "unknown-box")
+
+	out := mustRun(t, "send", "--human", "unknown-box", "hello")
+	if strings.Contains(out, "session is gone") {
+		t.Errorf("a session whose host was never detected was reported as gone:\n%s", out)
 	}
 }
