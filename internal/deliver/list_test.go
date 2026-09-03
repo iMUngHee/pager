@@ -3,6 +3,7 @@ package deliver
 import (
 	"database/sql"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +130,149 @@ func TestRosterNamesAndSkipsStale(t *testing.T) {
 	}
 	if got["nameless"] != "nameless" {
 		t.Errorf("a session with no name shows as %q, want its session id", got["nameless"])
+	}
+}
+
+func TestAgoRendersCoarsely(t *testing.T) {
+	const now = int64(1_000_000_000)
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want string
+	}{
+		{"seconds", 30 * time.Second, "just now"},
+		{"minutes", 5 * time.Minute, "5m ago"},
+		{"hours", 3 * time.Hour, "3h ago"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ago(now, now-tc.age.Milliseconds()); got != tc.want {
+				t.Errorf("ago(%s) = %q, want %q", tc.age, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatRosterRendersEveryColumn covers the rendering both `pager who` and
+// msg_roster print, including all three HOST words.
+//
+// The probe is injected per entry rather than by pid, so "live" is reachable
+// without a process the test would have to conjure — the same reason PresenceOf
+// takes a HostProbe. The seeded ages sit well inside their buckets so the LAST
+// column cannot flake on a boundary.
+func TestFormatRosterRendersEveryColumn(t *testing.T) {
+	const now = int64(1_000_000_000_000)
+	entries := []RosterEntry{
+		{SessionID: "s-live", Name: "bavu", Tool: "claude", Root: "/tmp/one",
+			LastSeen: now - 30_000, HostPid: 101, HostStart: 11},
+		{SessionID: "s-gone", Name: "hica", Tool: "codex", Root: "/tmp/two",
+			LastSeen: now - 5*60_000, HostPid: 102, HostStart: 22},
+		{SessionID: "s-unknown", Name: "s-unknown", Tool: "claude", Root: "/tmp/three",
+			LastSeen: now - 3*3_600_000},
+	}
+	// Answers from the recorded pid: 101 is running, 102 is definitely not, and
+	// a session with no host recorded is unknowable.
+	probe := func(pid int, _ int64) (alive, known bool) {
+		switch pid {
+		case 101:
+			return true, true
+		case 102:
+			return false, true
+		default:
+			return false, false
+		}
+	}
+
+	got := FormatRoster(entries, now, probe)
+	for _, want := range []string{
+		"NAME", "TOOL", "ROOT", "HOST", "LAST",
+		"bavu", "claude", "/tmp/one", "live", "just now",
+		"hica", "codex", "/tmp/two", "gone", "5m ago",
+		"s-unknown", "/tmp/three", "unknown", "3h ago",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the roster does not render %q:\n%s", want, got)
+		}
+	}
+
+	// An empty roster is a sentence, not a bare header: the CLI said so first
+	// and the MCP tool must not word it differently.
+	if empty := FormatRoster(nil, now, probe); empty != "no sessions are active\n" {
+		t.Errorf("an empty roster rendered %q", empty)
+	}
+}
+
+// TestHostStateSeparatesGoneFromUnknown fixes the mapping the HOST column
+// publishes. The pair the probe cannot produce — not alive, not known — is here
+// too: a caller reading "gone" hides mail, and nothing unknowable may reach that
+// word by an accident of switch order.
+func TestHostStateSeparatesGoneFromUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		alive, known bool
+		want         string
+	}{
+		{true, true, "live"},
+		{false, true, "gone"},
+		{false, false, "unknown"},
+		{true, false, "unknown"},
+	} {
+		if got := HostState(tc.alive, tc.known); got != tc.want {
+			t.Errorf("HostState(alive=%t, known=%t) = %q, want %q",
+				tc.alive, tc.known, got, tc.want)
+		}
+	}
+}
+
+// TestRosterCarriesTheHostColumns pins the host columns to the fields they
+// belong in, which the column count alone does not.
+//
+// Roster's SELECT and its Scan are positional, and heartbeat_at, host_start and
+// host_pid are all integers: a swap among them compiles, runs, and hands back
+// numbers that look like the ones asked for. TestRosterNamesAndSkipsStale reads
+// only SessionID and Name, so it stays green through exactly that mistake — and
+// the mistake ages every row wrong or calls a live session gone. The three
+// seeded values are deliberately unlike each other so no two can be confused.
+//
+// The hostless session is the other half: those columns are nullable, and a
+// session that never had a host detected must read as zero rather than fail the
+// scan, because zero is what HostState answers "unknown" to.
+func TestRosterCarriesTheHostColumns(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "hosted", workspace, "")
+	addSession(t, st, "hostless", workspace, "")
+	bindHost(t, st, "hosted", 4321, 111222333)
+	heartbeat := st.Now()
+
+	entries, err := Roster(ctx, st, stale)
+	if err != nil {
+		t.Fatalf("Roster: %v", err)
+	}
+	got := map[string]RosterEntry{}
+	for _, e := range entries {
+		got[e.SessionID] = e
+	}
+
+	hosted, ok := got["hosted"]
+	if !ok {
+		t.Fatal("the roster does not list the hosted session")
+	}
+	if hosted.HostPid != 4321 {
+		t.Errorf("HostPid = %d, want 4321", hosted.HostPid)
+	}
+	if hosted.HostStart != 111222333 {
+		t.Errorf("HostStart = %d, want 111222333", hosted.HostStart)
+	}
+	if hosted.LastSeen != heartbeat {
+		t.Errorf("LastSeen = %d, want the heartbeat %d", hosted.LastSeen, heartbeat)
+	}
+
+	hostless, ok := got["hostless"]
+	if !ok {
+		t.Fatal("the roster does not list the session with no host")
+	}
+	if hostless.HostPid != 0 || hostless.HostStart != 0 {
+		t.Errorf("a session with no host reads pid=%d start=%d, want both zero",
+			hostless.HostPid, hostless.HostStart)
 	}
 }
 

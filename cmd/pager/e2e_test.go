@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,82 @@ func TestWhoamiShowsName(t *testing.T) {
 	}
 }
 
+// TestWhoPrintsTheColumnContract pins the header and each field's position.
+//
+// TestWhoListsFreshNamedSessions substring-matches, so it would stay green
+// through a column reorder or a renamed header — and `pager who`'s columns are a
+// contract now that HOST is among them: adding a column is what broke the tmux
+// badge's reading of `pager inbox`, which parses with bash `read`.
+func TestWhoPrintsTheColumnContract(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_CLIENT", "none")
+
+	name := nameFromOutput(t, mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir))
+
+	out := mustRun(t, "who")
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("who printed no rows:\n%s", out)
+	}
+	if got := strings.Fields(lines[0]); !slices.Equal(got, []string{"NAME", "TOOL", "ROOT", "HOST", "LAST"}) {
+		t.Errorf("header = %v, want NAME TOOL ROOT HOST LAST", got)
+	}
+	// LAST renders as two words ("just now", "5m ago"), so the row is read by
+	// position from the left rather than by field count.
+	row := strings.Fields(lines[1])
+	if len(row) < 5 {
+		t.Fatalf("row has %d fields, want at least 5: %q", len(row), lines[1])
+	}
+	for i, want := range []string{name, "claude", dir} {
+		if row[i] != want {
+			t.Errorf("field %d = %q, want %q (row: %q)", i, row[i], want, lines[1])
+		}
+	}
+	// No host was detected for an attached session, and "unknown" is not a soft
+	// "gone": it must not be reported as an abandoned inbox.
+	if row[3] != "unknown" {
+		t.Errorf("HOST = %q for a session with no recorded host, want unknown", row[3])
+	}
+}
+
+// TestWhoMarksAGoneHost is the CLI half of the verdict msg_roster gives.
+//
+// Membership is decided by the heartbeat, which a session that died minutes ago
+// still satisfies for twelve hours, so without HOST the roster answers a
+// different question from the one it is read for.
+func TestWhoMarksAGoneHost(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msg.db")
+	t.Setenv("PAGER_DB", dbPath)
+	t.Setenv("PAGER_CLIENT", "none")
+
+	name := nameFromOutput(t, mustRun(t, "attach", "--session", "dead", "--tool", "claude", "--root", dir))
+
+	// attach could not bind this: detection is pinned off, so the session
+	// carries no host at all, which is the "cannot tell" case rather than this
+	// one.
+	st := openDB(t, dbPath)
+	if _, err := st.DB().ExecContext(t.Context(),
+		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
+		deadPid(t), 1, "dead"); err != nil {
+		t.Fatalf("bind a dead host: %v", err)
+	}
+
+	out := mustRun(t, "who")
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, name) {
+			continue
+		}
+		if !strings.Contains(line, "gone") {
+			t.Errorf("who does not mark a session whose host has exited:\n%s", line)
+		}
+		return
+	}
+	t.Errorf("who does not list the session at all:\n%s", out)
+}
+
 // TestWhoListsFreshNamedSessions: the roster answers "who can I page", so a
 // session whose hooks stopped running hours ago has no business in it.
 func TestWhoListsFreshNamedSessions(t *testing.T) {
@@ -288,25 +365,6 @@ func TestWhoListsFreshNamedSessions(t *testing.T) {
 	}
 	if !strings.Contains(out, "claude") || !strings.Contains(out, dir) {
 		t.Errorf("the roster does not say where the session is:\n%s", out)
-	}
-}
-
-func TestAgoRendersCoarsely(t *testing.T) {
-	const now = int64(1_000_000_000)
-	for _, tc := range []struct {
-		name string
-		age  time.Duration
-		want string
-	}{
-		{"seconds", 30 * time.Second, "just now"},
-		{"minutes", 5 * time.Minute, "5m ago"},
-		{"hours", 3 * time.Hour, "3h ago"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := ago(now, now-tc.age.Milliseconds()); got != tc.want {
-				t.Errorf("ago(%s) = %q, want %q", tc.age, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -802,27 +860,6 @@ func TestE2EInboxRejectsArguments(t *testing.T) {
 	}
 	if _, err := capture(t, "", "inbox", "--live"); err == nil {
 		t.Error("inbox accepted an undefined flag")
-	}
-}
-
-// TestHostStateSeparatesGoneFromUnknown fixes the mapping the HOST column
-// publishes. The pair the probe cannot produce — not alive, not known — is here
-// too: a caller reading "gone" hides mail, and nothing unknowable may reach that
-// word by an accident of switch order.
-func TestHostStateSeparatesGoneFromUnknown(t *testing.T) {
-	for _, tc := range []struct {
-		alive, known bool
-		want         string
-	}{
-		{true, true, "live"},
-		{false, true, "gone"},
-		{false, false, "unknown"},
-		{true, false, "unknown"},
-	} {
-		if got := hostState(tc.alive, tc.known); got != tc.want {
-			t.Errorf("hostState(alive=%t, known=%t) = %q, want %q",
-				tc.alive, tc.known, got, tc.want)
-		}
 	}
 }
 

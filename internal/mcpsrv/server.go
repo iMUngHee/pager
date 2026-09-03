@@ -34,7 +34,7 @@ type Server struct {
 	res *sessionref.Resolver
 }
 
-// New builds a server with both tools registered.
+// New builds a server with every tool registered.
 func New(st *store.Store) *Server {
 	s := &Server{
 		st: st,
@@ -87,6 +87,17 @@ func (s *Server) register() {
 				mcp.Description("Show only messages past the automatic delivery window — these are not retried and need resending by hand.")),
 		),
 		s.handleList,
+	)
+
+	s.mcp.AddTool(
+		mcp.NewTool("msg_roster",
+			mcp.WithDescription(
+				"List the sessions you can page right now — the companion to msg_send, which needs a name to address. "+
+					"HOST says whether the recorded process is still running: live, gone, or unknown when there is nothing to ask about. "+
+					"LAST is only when a hook last ran for that session, so a session working through a long turn can look old and one "+
+					"that died minutes ago can look recent. Address anyone here by the name in NAME."),
+		),
+		s.handleRoster,
 	)
 }
 
@@ -155,6 +166,25 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		out += "\n" + line
 	}
 	return mcp.NewToolResultText(out), nil
+}
+
+// handleRoster answers who is reachable.
+//
+// It resolves no session of its own, which is the one place this server departs
+// from the other two tools. They act as the caller — msg_send stores it as the
+// sender, msg_list reads and marks its inbox — so neither can proceed without
+// knowing who it is. A roster is a question about everyone else, and refusing it
+// to an unattributed caller would leave a session that no hook has recorded yet
+// with no way to learn a name at all, which is the situation this tool exists to
+// end.
+//
+// The rendering is deliver.FormatRoster, the same call `pager who` makes.
+func (s *Server) handleRoster(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entries, err := deliver.Roster(ctx, s.st, store.DefaultStale)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt)), nil
 }
 
 func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
