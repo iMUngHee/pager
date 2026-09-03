@@ -470,3 +470,145 @@ func TestSendReportsAStrandedHolder(t *testing.T) {
 		t.Errorf("msg_send still reported the poke outcome for a dead holder:\n%s", got)
 	}
 }
+
+// --- msg_roster ---------------------------------------------------------
+
+// roster calls the tool and returns its text, failing on a tool error.
+func roster(t *testing.T, s *session, id int) string {
+	t.Helper()
+	resp := s.call(id, "tools/call", map[string]any{
+		"name": "msg_roster", "arguments": map[string]any{},
+	})
+	if isError(t, resp) {
+		t.Fatalf("msg_roster failed: %s", text(t, resp))
+	}
+	return text(t, resp)
+}
+
+// bindDeadHost binds a session to a process that has certainly exited.
+func bindDeadHost(t *testing.T, st *store.Store, session string) {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run throwaway process: %v", err)
+	}
+	if _, err := st.Exec(t.Context(),
+		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
+		cmd.Process.Pid, 1, session); err != nil {
+		t.Fatalf("bind a dead host to %s: %v", session, err)
+	}
+}
+
+// TestRosterIsAdvertised is separate from TestToolsAreAdvertised on purpose: a
+// criterion proved by an already-passing test proves nothing about new work.
+func TestRosterIsAdvertised(t *testing.T) {
+	st := newStore(t)
+	s := start(t, st)
+
+	resp := s.call(2, "tools/list", map[string]any{})
+	raw, _ := json.Marshal(resp)
+	if !strings.Contains(string(raw), "msg_roster") {
+		t.Errorf("tools/list does not advertise msg_roster:\n%s", raw)
+	}
+}
+
+// TestRosterMarksAGoneHost is what the tool exists for. Membership is decided by
+// the heartbeat, which a session that died minutes ago still satisfies for
+// twelve hours — measured at 4 of 8 rows on the live database — so the answer to
+// "who can I page" has to carry the host verdict beside the name.
+func TestRosterMarksAGoneHost(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "live-session", "live-box")
+	seed(t, st, "dead-session", "dead-box")
+	bindDeadHost(t, st, "dead-session")
+
+	s := start(t, st)
+	got := roster(t, s, 2)
+	for _, line := range strings.Split(got, "\n") {
+		switch {
+		case strings.Contains(line, "dead-box"):
+			if !strings.Contains(line, "gone") {
+				t.Errorf("a session whose host has exited is not marked gone:\n%s", line)
+			}
+		case strings.Contains(line, "live-box"):
+			// No host was ever recorded for it, which is unknowable rather
+			// than dead — the distinction that keeps live mail visible.
+			if !strings.Contains(line, "unknown") {
+				t.Errorf("a session with no recorded host is not marked unknown:\n%s", line)
+			}
+		}
+	}
+}
+
+// TestRosterNamesLiveSessionsAndSkipsStale pins the wiring, not the rule: Roster
+// itself is tested in deliver, but nothing else would notice this handler
+// passing a staleness window of its own.
+func TestRosterNamesLiveSessionsAndSkipsStale(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "fresh-session", "fresh-box")
+	seed(t, st, "stale-session", "stale-box")
+	if _, err := st.Exec(t.Context(),
+		"UPDATE sessions SET heartbeat_at = ? WHERE session_id = ?",
+		st.Now()-(store.DefaultStale+time.Hour).Milliseconds(), "stale-session"); err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+
+	s := start(t, st)
+	got := roster(t, s, 2)
+	if !strings.Contains(got, "fresh-box") {
+		t.Errorf("the roster is missing a live session:\n%s", got)
+	}
+	if strings.Contains(got, "stale-box") {
+		t.Errorf("the roster lists a session that stopped heartbeating:\n%s", got)
+	}
+	if !strings.Contains(got, "claude") || !strings.Contains(got, "/tmp/mcp-workspace") {
+		t.Errorf("the roster does not say what the session is or where:\n%s", got)
+	}
+}
+
+// TestRosterListsTheCallerToo fixes the decision not to filter the caller out.
+// Nothing else in pager blocks addressing yourself, and hiding the caller would
+// make this answer differ from `pager who` for no gain.
+func TestRosterListsTheCallerToo(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	seed(t, st, "them", "their-box")
+	t.Setenv("PAGER_SESSION", "me")
+
+	s := start(t, st)
+	got := roster(t, s, 2)
+	if !strings.Contains(got, "my-box") {
+		t.Errorf("the roster hides the caller's own session:\n%s", got)
+	}
+	if !strings.Contains(got, "their-box") {
+		t.Errorf("the roster is missing the other session:\n%s", got)
+	}
+}
+
+// TestRosterAnswersWithoutASession is the deliberate difference from msg_send
+// and msg_list. Those act as the caller and must know who it is; a roster is a
+// question about everyone else, and refusing it would leave a session no hook
+// has recorded yet with no way to learn a name at all.
+func TestRosterAnswersWithoutASession(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "someone", "someone-box")
+	t.Setenv("PAGER_SESSION", "")
+	t.Setenv("PAGER_CLIENT", "none")
+
+	s := start(t, st)
+	got := roster(t, s, 2)
+	if !strings.Contains(got, "someone-box") {
+		t.Errorf("an unattributed caller got no roster:\n%s", got)
+	}
+}
+
+// TestRosterSaysWhenNobodyIsActive keeps the empty answer a sentence, and the
+// same sentence `pager who` prints.
+func TestRosterSaysWhenNobodyIsActive(t *testing.T) {
+	st := newStore(t)
+	s := start(t, st)
+
+	if got := roster(t, s, 2); !strings.Contains(got, "no sessions are active") {
+		t.Errorf("an empty roster rendered %q", got)
+	}
+}

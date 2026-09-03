@@ -166,10 +166,14 @@ claude mcp add pager -s user -- pager mcp
 codex  mcp add pager       -- pager mcp
 ```
 
+도구는 셋이다. `msg_send`로 보내고, `msg_list`로 내 앞으로 온 것을 보고, `msg_roster`로 **누구에게
+보낼 수 있는지**를 본다 — `pager who`와 같은 표를 낸다. 에이전트는 자기 이름을 훅 소개로 알지만
+남의 이름은 받은 메시지로만 알게 되므로, 보낼 상대를 고르려면 로스터가 필요하다.
+
 ## 쓰기
 
 ```bash
-pager who                                # 지금 부를 수 있는 세션 목록
+pager who                                # 부를 수 있는 세션 목록 + 각 호스트 생존 여부
 pager send hica "파서 작업 넘긴다"         # 보내기
 pager ls                                 # 내 앞으로 온 것 (읽은 것까지 전부)
 pager ls --waiting                       # 아무도 아직 안 챙긴 것만 — 작업 중 확인용
@@ -190,6 +194,26 @@ pager export > backup.jsonl              # 저장소 전체를 JSONL로
 
 폴링으로 읽은 메시지도 **다음 턴에 훅이 다시 주입한다.** 중복이 아니라 의도다 — 그 사이 컨텍스트가
 압축됐을 수 있어서, "누가 봤다"와 "지금 컨텍스트에 있다"는 같은 말이 아니다.
+
+### `pager who` — 누구에게 보낼 수 있나
+
+```
+NAME  TOOL    ROOT                      HOST     LAST
+gupa  claude  ~/Projects/portal/main    live     just now
+suzu  codex   ~/.config                 gone     8m ago
+hica  claude  ~/Projects/pager          unknown  21m ago
+```
+
+MCP `msg_roster`가 내는 것과 **같은 표다.** 렌더링이 한 곳에서 오므로 두 표면이 같은 질문에
+다르게 답할 수 없다.
+
+- **목록에 있다는 것과 살아있다는 것은 다르다.** 목록 기준은 `heartbeat_at`이고 기본 임계는
+  12시간이라, 몇 분 전에 죽은 세션도 반나절 동안 남아 있다(실측: 8행 중 4행). 그래서 `HOST`가
+  따로 있다 — 판정 근거와 세 단어의 뜻은 아래 `pager inbox` 항목과 같다.
+- `LAST`는 마지막 훅이 언제 돌았나일 뿐이다. 긴 턴 중인 세션은 오래돼 보이고, 방금 죽은 세션은
+  최근으로 보인다. **보낼지 말지는 `HOST`로 판단한다.**
+- 죽은 세션도 숨기지 않는다. 이름 뒤에 아무도 없는 수신함은 `pager claim`으로 이어받는 대상이고,
+  숨기면 그 후보가 안 보인다.
 
 ### `pager inbox` — 전역 대기 현황
 
@@ -215,7 +239,7 @@ hica   2        unknown
   마라** — 아무도 포기하지 않은 메일을 숨기게 된다.
 - `HOST`는 **heartbeat가 아니다.** `heartbeat_at`은 훅이 돌 때만 오르고 훅은 턴 경계에서 도니까,
   긴 턴 중인 세션은 멀쩡히 일하면서도 stale로 보인다(실측 7분). "이 세션 소식을 최근에 들었나"는
-  다른 질문이고, 그건 `who`가 답한다.
+  다른 질문이고, 그건 `who`의 `LAST` 컬럼이 답한다.
 - 죽은 수신함을 **숨길지는 소비자가 정한다.** pager는 보고만 한다 — 알림은 버리고 싶겠지만
   감사(audit)는 바로 그것들을 보고 싶어 한다.
 

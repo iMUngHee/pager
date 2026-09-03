@@ -30,8 +30,9 @@ func orphanAlias(t *testing.T, st *store.Store, alias string) {
 }
 
 // bindHost gives a session a host process, which addSession deliberately does
-// not: the roster never needed one, and an inbox listing is the first reader of
-// those columns.
+// not: a session is recorded by a hook whether or not detection found a host,
+// so the columns are nullable and both readers — an inbox listing and the
+// roster — have to answer for a session without them.
 func bindHost(t *testing.T, st *store.Store, session string, pid int, start int64) {
 	t.Helper()
 	if _, err := st.DB().ExecContext(t.Context(),

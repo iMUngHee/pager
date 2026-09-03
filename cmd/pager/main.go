@@ -16,7 +16,6 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/unghee/pager/internal/clock"
 	"github.com/unghee/pager/internal/deliver"
@@ -43,7 +42,7 @@ var commands = []command{
 	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
 	{"ls", "[--waiting] [--expired] [--session <id>]", "List messages addressed to this session", list},
 	{"inbox", "", "List every inbox with mail waiting in it", inbox},
-	{"who", "", "List the sessions that can be paged right now", who},
+	{"who", "", "List the sessions to page, and whether each host is still there", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"export", "", "Write every stored message to stdout as JSONL", export},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
@@ -302,48 +301,9 @@ func inbox(args []string) error {
 	fmt.Fprintln(tw, "INBOX\tWAITING\tHOST")
 	for _, b := range boxes {
 		fmt.Fprintf(tw, "%s\t%d\t%s\n", b.Alias, b.Waiting,
-			hostState(sessionref.Alive(sessionref.Instance{Pid: b.HostPid, Start: b.HostStart})))
+			deliver.HostState(sessionref.Alive(sessionref.Instance{Pid: b.HostPid, Start: b.HostStart})))
 	}
 	return tw.Flush()
-}
-
-// hostState names what a liveness probe found, in the one word the HOST column
-// prints.
-//
-// It takes the probe's answer rather than making the call itself so that every
-// branch is reachable from a test: "live" needs a process that really is running
-// under the exact start token recorded for it, which a unit test cannot conjure
-// but a caller can hand over.
-//
-// It reports; it does not filter. Whether to hide an inbox nobody is behind is
-// a policy of whatever is displaying this — a notification drops it, an audit
-// wants exactly those — and answering the question is all pager can do that its
-// callers cannot.
-//
-// "unknown" is a third answer, not a soft "gone". It covers an inbox with no
-// recorded host process at all, which happens when detection failed at attach
-// time or when the alias has outlived its session; nothing has been learned
-// about that mail, so calling it abandoned would tell a caller to hide a live
-// notification.
-//
-// Note what this deliberately does not use: heartbeat_at. It only advances when
-// a hook runs, and hooks run at turn boundaries, so a session in the middle of a
-// long turn looks stale while it is working fine — measured at 7 minutes stale
-// on a live session. `who` uses it to answer a different question, "have I heard
-// from this session lately", and that is the question it is good for.
-//
-// This switch lives here rather than in deliver because there is one consumer.
-// The moment there are two — an MCP tool asking the same thing — it moves, on
-// the reasoning Listed.State's comment gives: two copies of a vocabulary drift.
-func hostState(alive, known bool) string {
-	switch {
-	case !known:
-		return "unknown"
-	case alive:
-		return "live"
-	default:
-		return "gone"
-	}
 }
 
 func firstLine(body string) string {
@@ -523,11 +483,16 @@ func attach(args []string) error {
 	return nil
 }
 
-// who lists the sessions that can be paged right now.
+// who lists the sessions to address, and says which of them anyone is still
+// behind.
 //
 // This is how a person learns the names to address. A session is named without
 // being asked, which is what makes paging possible at all, but a name nobody
 // can see is a name nobody will use.
+//
+// Membership and liveness are separate answers here — see Roster and HostState.
+// The rendering is shared with the msg_roster MCP tool so the two surfaces
+// cannot answer the same question differently.
 func who(args []string) error {
 	fs := flag.NewFlagSet("who", flag.ContinueOnError)
 	if err := fs.Parse(permute(fs, args)); err != nil {
@@ -545,32 +510,8 @@ func who(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		fmt.Println("no sessions are active")
-		return nil
-	}
-
-	now := st.Now()
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTOOL\tROOT\tLAST")
-	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Tool, e.Root, ago(now, e.LastSeen))
-	}
-	return tw.Flush()
-}
-
-// ago renders a heartbeat's age coarsely. The exact time is not the question a
-// roster answers; "is this session still around" is.
-func ago(now, then int64) string {
-	d := time.Duration(now-then) * time.Millisecond
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	default:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	}
+	fmt.Print(deliver.FormatRoster(entries, st.Now(), sessionref.AliveAt))
+	return nil
 }
 
 // whoami reports what this invocation resolves to. It prints the detected host
