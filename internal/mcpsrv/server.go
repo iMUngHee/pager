@@ -95,7 +95,9 @@ func (s *Server) register() {
 				"List the sessions you can page right now — the companion to msg_send, which needs a name to address. "+
 					"HOST says whether the recorded process is still running: live, gone, or unknown when there is nothing to ask about. "+
 					"LAST is only when a hook last ran for that session, so a session working through a long turn can look old and one "+
-					"that died minutes ago can look recent. Address anyone here by the name in NAME."),
+					"that died minutes ago can look recent. PURPOSE is the last thing a person asked that session to do, which is how "+
+					"you tell apart two sessions in the same repository; it is empty for a session nobody has prompted, and a message "+
+					"pager itself sent to wake a session never becomes one. Address anyone here by the name in NAME."),
 		),
 		s.handleRoster,
 	)
@@ -184,7 +186,7 @@ func (s *Server) handleRoster(ctx context.Context, _ mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt)), nil
+	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt, true)), nil
 }
 
 func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

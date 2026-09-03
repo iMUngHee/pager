@@ -27,6 +27,82 @@ func lookup(t *testing.T, s *Store, pid int, start int64) string {
 	return id
 }
 
+// TestBothUpsertsKeepThePurpose covers a preservation rule that lives in two
+// statements.
+//
+// RecordSession branches on whether host detection found a process, and each
+// branch carries its own ON CONFLICT clause. A hook-level test cannot choose
+// which one runs — that depends on walking the real process ancestry — so it
+// would pin whichever branch the machine happened to take and leave the other
+// free to blank the column. Calling RecordSession directly with HostPid 0 and
+// then with a real-looking pid is what makes both reachable.
+//
+// The rule being pinned: a hook with no prompt (SessionStart, Stop) must refresh
+// the heartbeat without erasing what the session already said it was doing.
+func TestBothUpsertsKeepThePurpose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pid  int
+	}{
+		{"hostless upsert", 0},
+		{"host-bound upsert", testPid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newStore(t)
+			first := SessionRecord{
+				ID: "s1", Tool: testClient, Root: "/tmp/workspace",
+				HostClient: testClient, HostPid: tc.pid, HostStart: testStart,
+				Purpose: "wire up the roster",
+			}
+			if err := s.RecordSession(t.Context(), first); err != nil {
+				t.Fatalf("RecordSession: %v", err)
+			}
+
+			// The same session heartbeating from an event that carries no
+			// prompt at all.
+			second := first
+			second.Purpose = ""
+			if err := s.RecordSession(t.Context(), second); err != nil {
+				t.Fatalf("RecordSession without a purpose: %v", err)
+			}
+
+			var got string
+			if err := s.DB().QueryRowContext(t.Context(),
+				"SELECT COALESCE(purpose, '') FROM sessions WHERE session_id = ?", "s1").Scan(&got); err != nil {
+				t.Fatalf("read purpose: %v", err)
+			}
+			if got != "wire up the roster" {
+				t.Errorf("purpose = %q after a promptless heartbeat, want it preserved", got)
+			}
+		})
+	}
+}
+
+// TestPurposeIsReplacedByALaterPrompt is the other half: preservation must not
+// become immutability, or the column would freeze on a session's first prompt
+// and describe work that finished hours ago.
+func TestPurposeIsReplacedByALaterPrompt(t *testing.T) {
+	s, _ := newStore(t)
+	rec := hostRecord("s1")
+	rec.Purpose = "first thing"
+	if err := s.RecordSession(t.Context(), rec); err != nil {
+		t.Fatalf("RecordSession: %v", err)
+	}
+	rec.Purpose = "second thing"
+	if err := s.RecordSession(t.Context(), rec); err != nil {
+		t.Fatalf("RecordSession again: %v", err)
+	}
+
+	var got string
+	if err := s.DB().QueryRowContext(t.Context(),
+		"SELECT COALESCE(purpose, '') FROM sessions WHERE session_id = ?", "s1").Scan(&got); err != nil {
+		t.Fatalf("read purpose: %v", err)
+	}
+	if got != "second thing" {
+		t.Errorf("purpose = %q, want the later prompt", got)
+	}
+}
+
 func TestRecordSessionBindsHost(t *testing.T) {
 	s, _ := newStore(t)
 	if err := s.RecordSession(t.Context(), hostRecord("s1")); err != nil {

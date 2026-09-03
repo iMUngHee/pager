@@ -92,6 +92,17 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	if rec.Tool == sessionref.Unknown {
 		rec.Tool = ""
 	}
+	// The roster's PURPOSE column, written from the prompt this hook already
+	// carries. startsNewTurn is reused rather than restated: it is exactly the
+	// question being asked — is this a prompt of the user's own — and a second
+	// spelling of "not a poke" is how the two would drift apart. It now has two
+	// consumers, the causal epoch and this; narrowing it narrows both.
+	//
+	// An empty purpose leaves the stored value alone, which is what carries it
+	// across the SessionStart and Stop events that have no prompt at all.
+	if startsNewTurn(event, in) {
+		rec.Purpose = deliver.Purpose(in.Prompt)
+	}
 	if err := st.RecordSession(ctx, rec); err != nil {
 		return
 	}

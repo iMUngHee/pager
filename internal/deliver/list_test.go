@@ -182,7 +182,7 @@ func TestFormatRosterRendersEveryColumn(t *testing.T) {
 		}
 	}
 
-	got := FormatRoster(entries, now, probe)
+	got := FormatRoster(entries, now, probe, false)
 	for _, want := range []string{
 		"NAME", "TOOL", "ROOT", "HOST", "LAST",
 		"bavu", "claude", "/tmp/one", "live", "just now",
@@ -196,7 +196,7 @@ func TestFormatRosterRendersEveryColumn(t *testing.T) {
 
 	// An empty roster is a sentence, not a bare header: the CLI said so first
 	// and the MCP tool must not word it differently.
-	if empty := FormatRoster(nil, now, probe); empty != "no sessions are active\n" {
+	if empty := FormatRoster(nil, now, probe, false); empty != "no sessions are active\n" {
 		t.Errorf("an empty roster rendered %q", empty)
 	}
 }
@@ -219,6 +219,42 @@ func TestHostStateSeparatesGoneFromUnknown(t *testing.T) {
 			t.Errorf("HostState(alive=%t, known=%t) = %q, want %q",
 				tc.alive, tc.known, got, tc.want)
 		}
+	}
+}
+
+// TestRosterReadsAPreExistingSession is the migration's other half.
+//
+// ALTER TABLE ADD COLUMN leaves purpose NULL on every row that already existed,
+// and database/sql refuses to scan NULL into a string. Without the COALESCE in
+// Roster's SELECT the scan fails, and it fails for every session recorded before
+// this shipped — which on the day it ships is all of them — so `pager who` and
+// msg_roster would go down together rather than showing a blank column.
+//
+// The fixture leaves purpose untouched precisely because that is what a real
+// upgraded row looks like; setting it to "" here would test nothing.
+func TestRosterReadsAPreExistingSession(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "upgraded", workspace, "")
+
+	var isNull bool
+	if err := st.DB().QueryRowContext(ctx,
+		"SELECT purpose IS NULL FROM sessions WHERE session_id = ?", "upgraded").Scan(&isNull); err != nil {
+		t.Fatalf("read purpose: %v", err)
+	}
+	if !isNull {
+		t.Fatal("the fixture's purpose is not NULL — it no longer stands in for an upgraded row")
+	}
+
+	entries, err := Roster(ctx, st, stale)
+	if err != nil {
+		t.Fatalf("Roster over a row with a NULL purpose: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Roster returned %d entries, want 1", len(entries))
+	}
+	if entries[0].Purpose != "" {
+		t.Errorf("Purpose = %q for a session that never had one, want empty", entries[0].Purpose)
 	}
 }
 

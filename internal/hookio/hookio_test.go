@@ -14,6 +14,7 @@ import (
 	"github.com/unghee/pager/internal/clock"
 	"github.com/unghee/pager/internal/deliver"
 	"github.com/unghee/pager/internal/store"
+	"github.com/unghee/pager/internal/wake"
 )
 
 const workspace = "/tmp/hook-workspace"
@@ -604,5 +605,95 @@ func TestRecordsSessionSoItBecomesAddressable(t *testing.T) {
 	}
 	if root != workspace {
 		t.Errorf("root = %q, want %q from the payload", root, workspace)
+	}
+}
+
+// --- purpose -----------------------------------------------------------
+
+func purposeOf(t *testing.T, st *store.Store, session string) string {
+	t.Helper()
+	var got string
+	if err := st.DB().QueryRowContext(t.Context(),
+		"SELECT COALESCE(purpose, '') FROM sessions WHERE session_id = ?", session).Scan(&got); err != nil {
+		t.Fatalf("read purpose of %s: %v", session, err)
+	}
+	return got
+}
+
+func sessionStartPayload(session string) string {
+	return fmt.Sprintf(`{"session_id":%q,"cwd":%q,"hook_event_name":"SessionStart"}`,
+		session, workspace)
+}
+
+// TestPromptBecomesThePurpose is the whole feature at the write end: what a
+// person types is what the roster will say the session is doing.
+func TestPromptBecomesThePurpose(t *testing.T) {
+	st := newEnv(t)
+	detectionOff(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	run(t, EventUserPromptSubmit, claudePayload("s1", "roster에 purpose 컬럼\t추가해줘"))
+
+	if got, want := purposeOf(t, st, "s1"), "roster에 purpose 컬럼 추가해줘"; got != want {
+		t.Errorf("purpose = %q, want %q — folded by deliver.Purpose", got, want)
+	}
+}
+
+// TestPokeDoesNotBecomeThePurpose uses the real poke body rather than a
+// stand-in, because the exclusion is only worth anything against the text
+// pager actually sends.
+//
+// Without it the column would answer "what is this session working on" with
+// pager's own wake-up notice — and the more mail a session gets, the more often
+// that is the only thing it says.
+func TestPokeDoesNotBecomeThePurpose(t *testing.T) {
+	st := newEnv(t)
+	detectionOff(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	run(t, EventUserPromptSubmit, claudePayload("s1", "픽스처 정리 중"))
+	run(t, EventUserPromptSubmit, claudePayload("s1", wake.PokeBody("s1-box", "someone")))
+
+	if got, want := purposeOf(t, st, "s1"), "픽스처 정리 중"; got != want {
+		t.Errorf("purpose = %q, want the earlier human prompt %q", got, want)
+	}
+}
+
+// TestQuotedSentinelKeepsThePurpose pins an accepted imprecision rather than a
+// requirement.
+//
+// startsNewTurn matches the sentinel as a substring, so a genuine prompt that
+// quotes it is refused too. The alternative is a second definition of "this is
+// a poke", which is the drift the shared predicate exists to avoid, and the
+// cost of the imprecision is a stale purpose rather than a fabricated one.
+func TestQuotedSentinelKeepsThePurpose(t *testing.T) {
+	st := newEnv(t)
+	detectionOff(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	run(t, EventUserPromptSubmit, claudePayload("s1", "픽스처 정리 중"))
+	run(t, EventUserPromptSubmit,
+		claudePayload("s1", "왜 "+deliver.PokeSentinel+" 가 프롬프트에 들어가는지 봐줘"))
+
+	if got, want := purposeOf(t, st, "s1"), "픽스처 정리 중"; got != want {
+		t.Errorf("purpose = %q, want the previous value %q kept", got, want)
+	}
+}
+
+// TestSessionStartKeepsThePurpose guards the rule the column depends on most.
+//
+// Only UserPromptSubmit carries a prompt, so every other event passes an empty
+// purpose — several times per turn. If those writes were not preserving, the
+// column would be blank almost every time anyone read it.
+func TestSessionStartKeepsThePurpose(t *testing.T) {
+	st := newEnv(t)
+	detectionOff(t)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	run(t, EventUserPromptSubmit, claudePayload("s1", "픽스처 정리 중"))
+	run(t, EventSessionStart, sessionStartPayload("s1"))
+
+	if got, want := purposeOf(t, st, "s1"), "픽스처 정리 중"; got != want {
+		t.Errorf("purpose = %q after a promptless event, want %q", got, want)
 	}
 }
