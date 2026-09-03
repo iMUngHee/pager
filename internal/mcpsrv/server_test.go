@@ -510,6 +510,15 @@ func TestRosterIsAdvertised(t *testing.T) {
 	if !strings.Contains(string(raw), "msg_roster") {
 		t.Errorf("tools/list does not advertise msg_roster:\n%s", raw)
 	}
+	// A column whose source is not stated invites the wrong reading: PURPOSE
+	// looks like something the session declared about itself rather than the
+	// last thing a person asked it. The description is the only place an agent
+	// can learn otherwise, so it is part of the tool rather than commentary.
+	for _, want := range []string{"PURPOSE", "last thing a person asked", "wake"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("the msg_roster description does not explain PURPOSE (%q missing):\n%s", want, raw)
+		}
+	}
 }
 
 // TestRosterMarksAGoneHost is what the tool exists for. Membership is decided by
@@ -599,6 +608,38 @@ func TestRosterAnswersWithoutASession(t *testing.T) {
 	got := roster(t, s, 2)
 	if !strings.Contains(got, "someone-box") {
 		t.Errorf("an unattributed caller got no roster:\n%s", got)
+	}
+}
+
+// TestRosterShowsThePurpose is the reason the tool differs from `pager who`.
+//
+// Two sessions in one repository are the case a root cannot separate, so the
+// fixture puts them there: without PURPOSE an agent choosing between them has
+// nothing but identical ROOT values to go on.
+func TestRosterShowsThePurpose(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "one", "one-box")
+	seed(t, st, "two", "two-box")
+	if err := st.RecordSession(t.Context(), store.SessionRecord{
+		ID: "one", Purpose: "rewriting the tmux badge",
+	}); err != nil {
+		t.Fatalf("record purpose: %v", err)
+	}
+	if err := st.RecordSession(t.Context(), store.SessionRecord{
+		ID: "two", Purpose: "zsh completion for the new flag",
+	}); err != nil {
+		t.Fatalf("record purpose: %v", err)
+	}
+
+	s := start(t, st)
+	got := roster(t, s, 2)
+	if !strings.Contains(got, "PURPOSE") {
+		t.Errorf("the roster has no PURPOSE column:\n%s", got)
+	}
+	for _, want := range []string{"rewriting the tmux badge", "zsh completion for the new flag"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the roster does not say %q:\n%s", want, got)
+		}
 	}
 }
 

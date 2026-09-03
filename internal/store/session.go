@@ -15,12 +15,18 @@ const DefaultStale = 12 * time.Hour
 // SessionRecord is what a hook knows about its own session.
 type SessionRecord struct {
 	ID string
-	// Tool, Root and PMRef leave any existing value in place when empty. A
-	// hook that momentarily cannot detect its host still refreshes the
+	// Tool, Root, PMRef and Purpose leave any existing value in place when
+	// empty. A hook that momentarily cannot detect its host still refreshes the
 	// heartbeat; it must not blank out what the session already knows.
-	Tool  string
-	Root  string
-	PMRef string
+	//
+	// Purpose depends on that rule harder than the others do: only
+	// UserPromptSubmit carries a prompt, so SessionStart and Stop pass it empty
+	// on every single turn, and without the rule the column would be erased
+	// moments after each time it was written.
+	Tool    string
+	Root    string
+	PMRef   string
+	Purpose string
 
 	// HostClient, HostPid and HostStart bind the session to its host process.
 	// A zero HostPid means detection failed, in which case any existing
@@ -39,23 +45,31 @@ func (s *Store) RecordSession(ctx context.Context, rec SessionRecord) error {
 	if rec.ID == "" {
 		return errors.New("record session: empty session id")
 	}
+	// Bound as NULL when empty, which is what makes COALESCE below preserve the
+	// stored value: binding "" would have COALESCE keep the empty string and
+	// erase the column just as surely as excluded would.
 	var pmRef any
 	if rec.PMRef != "" {
 		pmRef = rec.PMRef
+	}
+	var purpose any
+	if rec.Purpose != "" {
+		purpose = rec.Purpose
 	}
 	now := s.Now()
 
 	return s.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
 		if rec.HostPid <= 1 {
 			_, err := c.ExecContext(ctx, `
-				INSERT INTO sessions(session_id, tool, root, pm_ref, heartbeat_at)
-				VALUES (?, ?, ?, ?, ?)
+				INSERT INTO sessions(session_id, tool, root, pm_ref, purpose, heartbeat_at)
+				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT(session_id) DO UPDATE SET
 					tool         = COALESCE(NULLIF(excluded.tool, ''), sessions.tool),
 					root         = COALESCE(NULLIF(excluded.root, ''), sessions.root),
 					pm_ref       = COALESCE(excluded.pm_ref, sessions.pm_ref),
+					purpose      = COALESCE(excluded.purpose, sessions.purpose),
 					heartbeat_at = excluded.heartbeat_at`,
-				rec.ID, rec.Tool, rec.Root, pmRef, now)
+				rec.ID, rec.Tool, rec.Root, pmRef, purpose, now)
 			if err != nil {
 				return fmt.Errorf("record session: %w", err)
 			}
@@ -74,17 +88,18 @@ func (s *Store) RecordSession(ctx context.Context, rec SessionRecord) error {
 			return fmt.Errorf("release host key: %w", err)
 		}
 		if _, err := c.ExecContext(ctx, `
-			INSERT INTO sessions(session_id, tool, root, pm_ref, heartbeat_at, host_client, host_pid, host_start)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO sessions(session_id, tool, root, pm_ref, purpose, heartbeat_at, host_client, host_pid, host_start)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				tool         = COALESCE(NULLIF(excluded.tool, ''), sessions.tool),
 				root         = COALESCE(NULLIF(excluded.root, ''), sessions.root),
 				pm_ref       = COALESCE(excluded.pm_ref, sessions.pm_ref),
+				purpose      = COALESCE(excluded.purpose, sessions.purpose),
 				heartbeat_at = excluded.heartbeat_at,
 				host_client  = excluded.host_client,
 				host_pid     = excluded.host_pid,
 				host_start   = excluded.host_start`,
-			rec.ID, rec.Tool, rec.Root, pmRef, now, rec.HostClient, rec.HostPid, rec.HostStart); err != nil {
+			rec.ID, rec.Tool, rec.Root, pmRef, purpose, now, rec.HostClient, rec.HostPid, rec.HostStart); err != nil {
 			return fmt.Errorf("record session: %w", err)
 		}
 		return nil

@@ -510,7 +510,7 @@ func who(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(deliver.FormatRoster(entries, st.Now(), sessionref.AliveAt))
+	fmt.Print(deliver.FormatRoster(entries, st.Now(), sessionref.AliveAt, false))
 	return nil
 }
 

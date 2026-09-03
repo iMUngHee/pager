@@ -24,6 +24,7 @@ import (
 var migrations = [...]string{
 	ddl, // 0 -> 1
 	`ALTER TABLE messages ADD COLUMN listed_at INTEGER`, // 1 -> 2
+	`ALTER TABLE sessions ADD COLUMN purpose TEXT`,      // 2 -> 3
 }
 
 // schemaVersion is the user_version this binary expects. len of an array is a

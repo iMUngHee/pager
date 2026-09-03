@@ -171,6 +171,7 @@ func TestMigrationsAreAppendOnly(t *testing.T) {
 	want := []string{
 		"9b773708f612d2ef8b37f61bc88dd2929c516f2616ef739279f1e270b917dec2", // 0 -> 1 (ddl)
 		"8b11f1573b1ecc6b99fd42ea5ae1dd367c4bcc7e49bf546615c5ae4e471ce802", // 1 -> 2 (listed_at)
+		"fa2044e78bcdadaa98616e6bea55f78f2e27910d4497ff96dbdf2b2dcc345747", // 2 -> 3 (purpose)
 	}
 	if len(want) != len(migrations) {
 		t.Fatalf("%d migrations but %d digests — append the new entry's digest", len(migrations), len(want))
@@ -206,6 +207,33 @@ func TestUpgradesAVersionOneDatabase(t *testing.T) {
 	}
 	if !hasColumn(t, path, "messages", "listed_at") {
 		t.Error("listed_at is missing after the upgrade")
+	}
+}
+
+// TestUpgradeAddsThePurposeColumn is the same shape as the listed_at upgrade
+// above, for the column msg_roster reads.
+//
+// The fixture is schemaVersion-1 rather than schemaVersion, and the difference
+// is the whole test: openAtVersion replays every entry below its argument, so
+// seeding at the current version would hand back a database that already has
+// the column and the assertion below would pass without Open doing anything.
+func TestUpgradeAddsThePurposeColumn(t *testing.T) {
+	path := openAtVersion(t, schemaVersion-1)
+	if hasColumn(t, path, "sessions", "purpose") {
+		t.Fatal("the fixture already has purpose — it was not seeded below the migration that adds it")
+	}
+
+	s, err := Open(t.Context(), path, clock.NewFake(testBase))
+	if err != nil {
+		t.Fatalf("Open a database one version behind: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := userVersion(t, path); got != schemaVersion {
+		t.Errorf("user_version = %d after opening, want %d", got, schemaVersion)
+	}
+	if !hasColumn(t, path, "sessions", "purpose") {
+		t.Error("purpose is missing after the upgrade")
 	}
 }
 
@@ -394,12 +422,19 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	// Three entries, joined at 1: two run, and the version recorded must be 3 —
+	// Four entries, joined at 1: three run, and the version recorded must be 4 —
 	// the length of what ran, not schemaVersion.
+	//
+	// The list grows whenever a real migration lands, because its whole job is
+	// to be a different length from schemaVersion. The guard below is what says
+	// so: it fired when the purpose migration made the real log three long,
+	// which is the failure that stops this test from quietly becoming a
+	// tautology.
 	longer := []string{
 		migrations[0],
 		`ALTER TABLE messages ADD COLUMN listed_at INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only INTEGER`,
+		`ALTER TABLE messages ADD COLUMN probe_only_too INTEGER`,
 	}
 	if len(longer) == schemaVersion {
 		t.Fatalf("the fixture list is %d long, the same as schemaVersion — it cannot tell them apart", len(longer))

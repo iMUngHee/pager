@@ -246,6 +246,14 @@ type RosterEntry struct {
 	// HostProbe.
 	HostPid   int
 	HostStart int64
+	// Purpose is the last thing a person asked this session to do, folded to
+	// one line by Purpose. It is empty for a session that has not been prompted
+	// since the column shipped, and for one whose only prompts were pokes.
+	//
+	// Root says where a session is and this says what it is on: two sessions in
+	// one repository are indistinguishable without it, which is the case that
+	// stops an agent from working out who owns the thing it just changed.
+	Purpose string
 }
 
 // Roster lists the sessions heard from within staleAfter, most recently active
@@ -267,7 +275,8 @@ func Roster(ctx context.Context, st *store.Store, staleAfter time.Duration) ([]R
 		       COALESCE((SELECT a.alias FROM aliases a WHERE a.session_id = s.session_id
 		                  `+primaryAliasOrder+` LIMIT 1), s.session_id),
 		       s.tool, s.root, s.heartbeat_at,
-		       COALESCE(s.host_pid, 0), COALESCE(s.host_start, 0)
+		       COALESCE(s.host_pid, 0), COALESCE(s.host_start, 0),
+		       COALESCE(s.purpose, '')
 		  FROM sessions s
 		 WHERE s.heartbeat_at >= ?
 		 ORDER BY s.heartbeat_at DESC, s.session_id`,
@@ -281,7 +290,7 @@ func Roster(ctx context.Context, st *store.Store, staleAfter time.Duration) ([]R
 	for rows.Next() {
 		var e RosterEntry
 		if err := rows.Scan(&e.SessionID, &e.Name, &e.Tool, &e.Root, &e.LastSeen,
-			&e.HostPid, &e.HostStart); err != nil {
+			&e.HostPid, &e.HostStart, &e.Purpose); err != nil {
 			return nil, fmt.Errorf("list sessions: %w", err)
 		}
 		out = append(out, e)
@@ -301,16 +310,32 @@ func Roster(ctx context.Context, st *store.Store, staleAfter time.Duration) ([]R
 // The probe is injected for the reason HostProbe's own comment gives — deliver
 // reads the database, never process state — and taking it per call also keeps
 // every HOST word reachable from a test.
-func FormatRoster(entries []RosterEntry, now int64, probe HostProbe) string {
+//
+// withPurpose is what separates the two readers rather than two renderers. The
+// CLI leaves it off: `pager who` already prints 116-column rows into an
+// 80-column terminal, and a sixth column takes that to 158, so a person reading
+// the table would pay for a field they did not ask for. An MCP result is a text
+// block with no width budget, and the agent reading it is the one that has to
+// work out who owns the thing it just changed. The wording stays in one place
+// either way, which is the point.
+func FormatRoster(entries []RosterEntry, now int64, probe HostProbe, withPurpose bool) string {
 	if len(entries) == 0 {
 		return "no sessions are active\n"
 	}
 	var sb strings.Builder
 	tw := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tTOOL\tROOT\tHOST\tLAST")
+	header := "NAME\tTOOL\tROOT\tHOST\tLAST"
+	if withPurpose {
+		header += "\tPURPOSE"
+	}
+	fmt.Fprintln(tw, header)
 	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.Name, e.Tool, e.Root,
+		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", e.Name, e.Tool, e.Root,
 			HostState(probe(e.HostPid, e.HostStart)), ago(now, e.LastSeen))
+		if withPurpose {
+			row += "\t" + e.Purpose
+		}
+		fmt.Fprintln(tw, row)
 	}
 	tw.Flush()
 	return sb.String()
