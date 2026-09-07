@@ -211,7 +211,7 @@ func TestLiveClaudeWake(t *testing.T) {
 	}
 	epochBefore := causalEpoch(t, st, target)
 
-	got := Wake(ctx, target, PokeBody("livetarget", "livetest"))
+	got := Wake(ctx, target, PokeBody("livetarget", "livetest", ""))
 	if got.Outcome != Woken {
 		t.Fatalf("Wake() = %q via %q (%v), want %q", got.Outcome, got.Via, got.Err, Woken)
 	}
@@ -251,7 +251,7 @@ func TestLiveCodexWake(t *testing.T) {
 	}
 
 	queued := countCodexQueue(t)
-	body := PokeBody("livetarget", "livetest")
+	body := PokeBody("livetarget", "livetest", "")
 	if err := w.poke(context.Background(), thread, body); err != nil {
 		t.Fatalf("poke: %v", err)
 	}

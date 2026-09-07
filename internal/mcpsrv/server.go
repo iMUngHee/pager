@@ -158,10 +158,14 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	tool, err := deliver.SenderTool(ctx, s.st, sender)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	if line := presence.Note(found.Alias); line != "" {
 		out += "\n" + line
 	} else if line := wake.Describe(
-		wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label)), found.Alias,
+		wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool)), found.Alias,
 	); line != "" {
 		// Reported, never fatal. The message is stored either way; a poke only
 		// moves when the recipient reads it.

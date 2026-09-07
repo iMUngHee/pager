@@ -179,10 +179,18 @@ func classify(err error) Outcome {
 // because only msg_list records that the mail was read — following a hint to
 // `pager ls` would show the message and then have the next hook inject it
 // again.
-func PokeBody(alias, label string) string {
+//
+// tool is the sender's host ("claude" or "codex") and may be "". It is named
+// because the receiving host wraps the poke in its own framing — Claude Code
+// says "another Claude session sent a message" whatever the sender runs under —
+// so without it a Codex sender reads as Claude.
+func PokeBody(alias, label, tool string) string {
 	from := label
 	if from == "" {
 		from = "another session"
+	}
+	if tool != "" {
+		from += " (" + tool + " session)"
 	}
 	return "pager: new mail for " + alias + " from " + from + ". " + deliver.PokeSentinel +
 		" If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."

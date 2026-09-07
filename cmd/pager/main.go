@@ -149,7 +149,11 @@ func send(args []string) error {
 	// The message is already stored, so nothing below can cost a delivery. A
 	// poke only decides whether the recipient reads it now or the next time it
 	// runs, which is why wake reports an outcome instead of returning an error.
-	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, *label)), found.Alias); line != "" {
+	tool, err := deliver.SenderTool(ctx, st, ref.SessionID)
+	if err != nil {
+		return err
+	}
+	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, *label, tool)), found.Alias); line != "" {
 		fmt.Println(line)
 	}
 	return nil

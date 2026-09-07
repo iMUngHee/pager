@@ -183,7 +183,7 @@ func TestEmptySessionIsQueued(t *testing.T) {
 // TestPokeBodyCarriesSentinel is what keeps a poke from resetting the
 // recipient's causal chain. hookio looks for exactly this marker.
 func TestPokeBodyCarriesSentinel(t *testing.T) {
-	body := PokeBody("niso", "zuka")
+	body := PokeBody("niso", "zuka", "")
 
 	if !strings.Contains(body, deliver.PokeSentinel) {
 		t.Errorf("PokeBody() = %q, want it to contain %q", body, deliver.PokeSentinel)
@@ -197,8 +197,20 @@ func TestPokeBodyCarriesSentinel(t *testing.T) {
 // a read, so a hint pointing only there leaves the mail pending and the next
 // hook injects it again.
 func TestPokeBodyNamesRecordingReader(t *testing.T) {
-	if body := PokeBody("niso", "zuka"); !strings.Contains(body, "msg_list") {
+	if body := PokeBody("niso", "zuka", ""); !strings.Contains(body, "msg_list") {
 		t.Errorf("PokeBody() = %q, want it to name msg_list", body)
+	}
+}
+
+// TestPokeBodyNamesSenderTool is a live find: Claude Code frames every injected
+// message as "another Claude session sent a message", so a poke from a Codex
+// session read as Claude until the body said otherwise.
+func TestPokeBodyNamesSenderTool(t *testing.T) {
+	if body := PokeBody("zejo", "fazo", "codex"); !strings.Contains(body, "from fazo (codex session).") {
+		t.Errorf("PokeBody() = %q, want the sender's tool named", body)
+	}
+	if body := PokeBody("zejo", "fazo", ""); strings.Contains(body, " session)") {
+		t.Errorf("PokeBody() = %q, want no tool parenthetical when the tool is unknown", body)
 	}
 }
 

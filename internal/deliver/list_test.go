@@ -51,6 +51,35 @@ func TestSenderLabelNeverBorrowsHuman(t *testing.T) {
 	}
 }
 
+// TestSenderToolReadsTheSessionRow pins what the poke names: the host the
+// sending session runs under, "" when nothing is known. A human sender has no
+// session and a session the store never saw has no row; neither is an error.
+func TestSenderToolReadsTheSessionRow(t *testing.T) {
+	st, _ := newStore(t)
+	ctx := t.Context()
+	addSession(t, st, "claude-session", workspace, "")
+	if err := st.RecordSession(ctx, store.SessionRecord{ID: "codex-session", Tool: "codex", Root: workspace}); err != nil {
+		t.Fatalf("record codex session: %v", err)
+	}
+
+	for _, tc := range []struct{ name, session, want string }{
+		{"a codex session names codex", "codex-session", "codex"},
+		{"a claude session names claude", "claude-session", tool},
+		{"an unknown session is blank", "never-seen", ""},
+		{"a human sender is blank", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SenderTool(ctx, st, tc.session)
+			if err != nil {
+				t.Fatalf("SenderTool: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("SenderTool(%q) = %q, want %q", tc.session, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestPrimaryAliasPrefersManual fixes the rule that lets an automatic name be
 // an ordinary alias row: a name a person sets is the one the session is known
 // by, however soon after the automatic one it was written.
