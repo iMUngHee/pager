@@ -652,7 +652,7 @@ func TestPokeDoesNotBecomeThePurpose(t *testing.T) {
 	seedSessionOnly(t, st, "s1", "claude")
 
 	run(t, EventUserPromptSubmit, claudePayload("s1", "픽스처 정리 중"))
-	run(t, EventUserPromptSubmit, claudePayload("s1", wake.PokeBody("s1-box", "someone")))
+	run(t, EventUserPromptSubmit, claudePayload("s1", wake.PokeBody("s1-box", "someone", "codex")))
 
 	if got, want := purposeOf(t, st, "s1"), "픽스처 정리 중"; got != want {
 		t.Errorf("purpose = %q, want the earlier human prompt %q", got, want)

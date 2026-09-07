@@ -226,6 +226,26 @@ func SenderLabel(ctx context.Context, st *store.Store, session string) (string, 
 	return session, nil
 }
 
+// SenderTool is the host a sending session runs under ("claude" or "codex"),
+// or "" for a human sender or a session the store has never seen. The poke
+// names it because the receiving host frames every injected message as coming
+// from a peer of its own kind: Claude Code shows "another Claude session sent a
+// message" even when the sender is Codex.
+func SenderTool(ctx context.Context, st *store.Store, session string) (string, error) {
+	if session == "" {
+		return "", nil
+	}
+	var tool string
+	err := st.DB().QueryRowContext(ctx, "SELECT tool FROM sessions WHERE session_id = ?", session).Scan(&tool)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read sender tool: %w", err)
+	}
+	return tool, nil
+}
+
 // RosterEntry is one session as `pager who` shows it.
 type RosterEntry struct {
 	SessionID string
