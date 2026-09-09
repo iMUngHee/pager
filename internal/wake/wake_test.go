@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/unghee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/deliver"
 )
 
 // stub is a surface that answers however a test needs and counts what it was

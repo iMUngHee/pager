@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/unghee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/clock"
 )
 
 // These cover the upgrade path: migrate replaying an ordered log rather than

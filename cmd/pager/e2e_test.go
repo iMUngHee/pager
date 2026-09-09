@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // These drive the real command dispatch end to end. They are the check that the

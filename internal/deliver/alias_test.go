@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 var testBase = time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)

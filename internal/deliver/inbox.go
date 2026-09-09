@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // Inbox is one alias and what is waiting in it, as `pager inbox` shows it.

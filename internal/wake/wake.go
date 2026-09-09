@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/unghee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/deliver"
 )
 
 // Deadline bounds one whole wake attempt — reaching, connecting, writing.

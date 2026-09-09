@@ -3,7 +3,7 @@ package deliver
 import (
 	"testing"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // orphanAlias writes an alias whose holder is NULL, which no code path

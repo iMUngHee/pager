@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/deliver"
-	"github.com/unghee/pager/internal/store"
-	"github.com/unghee/pager/internal/wake"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 const workspace = "/tmp/hook-workspace"

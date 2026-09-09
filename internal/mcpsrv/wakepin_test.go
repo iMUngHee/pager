@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/unghee/pager/internal/wake"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 // TestWakePinnedOff guards the wake half of TestMain; removing that pin must

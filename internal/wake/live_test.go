@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/deliver"
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // buildPager compiles this working tree so the receiving session's hook runs
@@ -34,7 +34,7 @@ import (
 func buildPager(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "pager")
-	cmd := exec.Command("go", "build", "-o", bin, "github.com/unghee/pager/cmd/pager")
+	cmd := exec.Command("go", "build", "-o", bin, "github.com/iMUngHee/pager/cmd/pager")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build pager: %v\n%s", err, out)
 	}

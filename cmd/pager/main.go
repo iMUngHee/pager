@@ -17,13 +17,13 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/deliver"
-	"github.com/unghee/pager/internal/hookio"
-	"github.com/unghee/pager/internal/mcpsrv"
-	"github.com/unghee/pager/internal/sessionref"
-	"github.com/unghee/pager/internal/store"
-	"github.com/unghee/pager/internal/wake"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/hookio"
+	"github.com/iMUngHee/pager/internal/mcpsrv"
+	"github.com/iMUngHee/pager/internal/sessionref"
+	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 // command is one pager subcommand. This table is the single source of truth

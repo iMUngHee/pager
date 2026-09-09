@@ -1,4 +1,4 @@
-module github.com/unghee/pager
+module github.com/iMUngHee/pager
 
 go 1.26.5
 

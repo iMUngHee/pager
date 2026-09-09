@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/unghee/pager/internal/sessionref"
+	"github.com/iMUngHee/pager/internal/sessionref"
 )
 
 // TestMain pins host detection and wake off for every test in this package.

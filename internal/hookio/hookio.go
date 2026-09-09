@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/deliver"
-	"github.com/unghee/pager/internal/sessionref"
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/sessionref"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // Hook events pager reacts to.
