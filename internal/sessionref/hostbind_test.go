@@ -37,7 +37,7 @@ const (
 // under.
 func runHostHarness(t *testing.T, pin string) (ok bool, client string, pid int, start int64, hostPid int) {
 	t.Helper()
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if !procInfoSupported {
 		t.Skipf("procInfo is unsupported on %s", runtime.GOOS)
 	}
 	self, err := os.Executable()
@@ -46,8 +46,10 @@ func runHostHarness(t *testing.T, pin string) (ok bool, client string, pid int, 
 	}
 
 	// The host process must be *named* claude — that name is the whole basis
-	// of the match.
-	hostPath := filepath.Join(t.TempDir(), Claude)
+	// of the match. Windows will not execute a file without an executable
+	// extension, and commandMatchesClient trims .exe precisely so the name
+	// still matches with it.
+	hostPath := filepath.Join(t.TempDir(), Claude+exeSuffix())
 	copyExecutable(t, self, hostPath)
 
 	cmd := exec.Command(hostPath, "-test.run=^TestHostHelper$")
@@ -118,7 +120,7 @@ func TestHostHelper(t *testing.T) {
 	if pin == "" {
 		pin = Claude
 	}
-	cmd := exec.Command("/bin/sh", "-c", "'"+self+"' -test.run='^TestProbeHelper$'")
+	cmd := shellRunning(self, "-test.run=^TestProbeHelper$")
 	cmd.Env = append(os.Environ(),
 		envHostHelper+"=", // stop the recursion
 		envProbeHelper+"=1",
@@ -159,6 +161,40 @@ func parseResult(t *testing.T, out string) (ok bool, client string, pid int, sta
 	}
 	t.Fatalf("no %s line in helper output:\n%s", resultPrefix, out)
 	return
+}
+
+// exeSuffix is the extension an executable must carry to be runnable at all.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// shellRunning returns a command that runs prog through the platform shell.
+//
+// The shell is the point: it is the extra ancestry level the walk has to climb
+// past to reach the host. Arguments are passed as separate argv entries on
+// Windows rather than as one string, which keeps cmd.exe away from the regex —
+// ^ is its escape character, and -test.run patterns are full of them.
+func shellRunning(prog string, args ...string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", append([]string{"/c", prog}, args...)...)
+	}
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = "'" + a + "'"
+	}
+	return exec.Command("/bin/sh", "-c", "'"+prog+"' "+strings.Join(quoted, " "))
+}
+
+// shellScript runs a one-line script through the platform shell. Used only for
+// a throwaway process whose exit is the whole point.
+func shellScript(script string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/c", script)
+	}
+	return exec.Command("/bin/sh", "-c", script)
 }
 
 func copyExecutable(t *testing.T, src, dst string) {
@@ -202,7 +238,7 @@ func TestAliveSeparatesGoneFromUnknowable(t *testing.T) {
 	// A process that has certainly exited. Its pid may be recycled later, but
 	// then its start token differs and the answer is still "not the one we
 	// recorded" — the same expectation either way.
-	dead := exec.Command("/bin/sh", "-c", "exit 0")
+	dead := shellScript("exit 0")
 	if err := dead.Run(); err != nil {
 		t.Fatalf("run throwaway process: %v", err)
 	}
