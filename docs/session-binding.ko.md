@@ -39,8 +39,17 @@ Instance{ Pid int, Start int64 }
 ```
 
 `Start`는 플랫폼 상대 프로세스 시작 토큰이다 — darwin은 `kern.proc.pid` sysctl의
-`P_starttime`(ms), linux는 `/proc/<pid>/stat` 22번 필드(starttime jiffies). 단위는
-무의미하고 **같은 머신의 두 프로세스가 같은 값을 읽는다는 안정성만** 의미가 있다.
+`P_starttime`(ms), linux는 `/proc/<pid>/stat` 22번 필드(starttime jiffies), windows는
+`GetProcessTimes`의 생성 시각(ns). 단위는 무의미하고 **같은 머신의 두 프로세스가 같은 값을
+읽는다는 안정성만** 의미가 있다.
+
+**토큰을 못 읽은 호스트는 거부한다.** darwin과 linux는 프로세스의 존재를 증명하는 그 읽기에서
+토큰이 함께 나오므로 토큰만 따로 유실될 수 없다. windows는 열린 핸들이 필요하고 핸들은 거부될
+수 있다 — 비권한 호출자가 본 상위 권한 호스트가 가장 구체적인 경우다. 토큰 없는 pid는 신원이
+아니다: 그 번호를 다음에 받는 프로세스와 구별할 근거가 없고, 열리지 않는 두 프로세스는 서로
+같은 값으로 비교된다. 그래서 `Detect`는 그것을 호스트 없음으로 취급하고, `Alive`는 "살아있다"가
+아니라 "모른다"로 답하며, 세션은 1·2순위로 떨어진다. 기록해 버리면 토큰이 막으려던 오배달을
+그대로 되살린다.
 
 탐지는 **조상 체인 상향 탐색**이다:
 
@@ -58,6 +67,13 @@ pid = os.Getppid()
 - 훅도 마찬가지로 자손이다.
 
 세 경로가 모두 같은 조상에 도달하므로 같은 `Instance`를 얻는다.
+
+**탐색은 프로세스 표를 단계마다가 아니라 한 번 읽는다.** darwin과 linux는 각 단계가 pid 하나를
+겨냥한 읽기라 어느 쪽이든 비용 차이가 없다. windows는 부모 pid를 머신의 모든 프로세스를 담은
+스냅샷에서만 얻을 수 있어서, 단계마다 물으면 전체를 최대 16번 다시 훑는다 — 위에 호스트가 없는
+모든 호출에서 그렇게 되는데, 세션 밖에서 CLI를 부르는 평범한 경우가 그것이다. 생존 확인은 그
+반대편이다: 부모가 필요 없으므로 스냅샷을 아예 뜨지 않는다. `who`와 `inbox`가 행마다 기록된
+프로세스를 하나씩 확인하기 때문에 이게 중요하다.
 
 **전체 argv를 매칭에 쓰지 않는다.** 훅 명령의 인자에는 `~/.codex` 같은 경로가 들어갈 수
 있어서, argv 전체를 보면 codex가 아닌 프로세스를 codex 호스트로 오인한다. `comm`과
@@ -248,11 +264,11 @@ SELECT session_id FROM sessions
 | --- | --- | --- |
 | SQLite 드라이버 | `modernc.org/sqlite v1.50.1` | 순수 Go → CGO 불필요, 크로스 컴파일 가능 |
 | MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | stdio 서버에 필요한 최소 표면만 쓴다 |
-| syscall 래퍼 | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` 파싱 |
+| syscall 래퍼 | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` 파싱 / windows toolhelp 스냅샷·프로세스 시각·종료 상태 |
 
 세 패키지는 각각 `internal/store`, `internal/mcpsrv`, `internal/sessionref`·`internal/wake`가
-import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 syscall 래퍼는 darwin과 linux의
-경로가 갈리므로, 올릴 때 두 플랫폼 모두에서 `internal/sessionref` 테스트를 돌려야 한다.
+import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 syscall 래퍼는 darwin·linux·windows의
+경로가 갈리므로, 올릴 때 세 플랫폼 모두에서 `internal/sessionref` 테스트를 돌려야 한다.
 
 ## 이 계약이 깨지는 조건
 
@@ -262,7 +278,9 @@ import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 sys
 - **호스트가 CLI를 자손으로 실행하지 않는다** — 부모 체인이 끊기면 3순위가 무력해진다.
   이때는 1순위(`--session`)나 2순위(`PAGER_SESSION`)로 명시해야 한다.
 - **16단보다 깊은 래퍼 체인** — 탐지 실패.
-- **darwin/linux 이외** — `procInfo`가 미지원이므로 3순위가 항상 실패한다. 1·2순위만
-  동작한다.
+- **호스트의 시작 토큰을 못 읽는다** — windows에서만이고, 플랫폼이 아니라 그 세션이 3순위를
+  잃는다. 위 "토큰을 못 읽은 호스트는 거부한다"를 보라.
+- **darwin·linux·windows 이외** — 프로세스 조회가 미구현이므로 3순위가 항상 실패한다.
+  1·2순위만 동작한다.
 
 전부 fail-closed 방향이고, 첫 번째와 두 번째는 CLI 발신이 통째로 막히면서 즉시 드러난다.

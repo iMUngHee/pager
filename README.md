@@ -36,7 +36,9 @@ make build     # builds to ~/.local/bin/pager
 
 No C toolchain needed: the SQLite driver is pure Go, so it cross-compiles too.
 Everything lives in one file, `~/.pager/msg.db`, created as `0600` in a `0700`
-directory.
+directory on macOS and Linux. Windows has no mode bits for that to mean
+anything, and pager does not set ACLs, so there the file is only as private as
+the directory it sits in.
 
 Then register a hook, because **the hook is what delivers**. Sending writes to
 the database; only a hook can put text into a session's context.

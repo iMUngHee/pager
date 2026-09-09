@@ -47,8 +47,19 @@ Instance{ Pid int, Start int64 }
 
 `Start` is a platform-relative process start token — on darwin, `P_starttime`
 (ms) from the `kern.proc.pid` sysctl; on linux, field 22 (starttime jiffies) of
-`/proc/<pid>/stat`. The unit is meaningless. **All that matters is the
-stability of two processes on the same machine reading the same value.**
+`/proc/<pid>/stat`; on windows, the creation time (ns) from `GetProcessTimes`.
+The unit is meaningless. **All that matters is the stability of two processes on
+the same machine reading the same value.**
+
+**A host without a readable token is refused.** On darwin and linux the token
+comes from the same read that proves the process exists, so it cannot go missing
+on its own. Windows needs an open handle for it, and a handle can be refused —
+an elevated host seen from an unelevated caller, most concretely. A pid with no
+token is not an identity: nothing tells it apart from the next process to be
+given that number, and two processes that both refuse to be opened would compare
+equal. So `Detect` treats it as no host at all, `Alive` answers "cannot tell"
+rather than "alive", and the session falls back to tiers 1 and 2. Recording it
+would reintroduce exactly the misdelivery the token exists to prevent.
 
 Detection walks **up the ancestor chain**:
 
@@ -66,6 +77,15 @@ not found within 16 levels → detection failed
 - Hooks are descendants in the same way.
 
 All three paths reach the same ancestor, so all three get the same `Instance`.
+
+**The walk reads the process table once, not once per level.** On darwin and
+linux each step is a targeted read about one pid, so this costs nothing either
+way. On windows a parent pid is only available from a snapshot of every process
+on the machine, and asking per step would rescan all of them up to 16 times —
+for every invocation with no host above it, which is the ordinary case for a CLI
+run outside a session. The liveness probe is the other side of this: it needs no
+parent, so it never takes a snapshot at all, which matters because `who` and
+`inbox` probe one recorded process per row.
 
 **The full argv is not used for matching.** A hook command's arguments can
 contain a path like `~/.codex`, so looking at the whole argv would mistake a
@@ -287,13 +307,13 @@ breaker.**
 | --- | --- | --- |
 | SQLite driver | `modernc.org/sqlite v1.50.1` | Pure Go → no CGO, cross-compiles |
 | MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | Uses only the minimum surface a stdio server needs |
-| syscall wrapper | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` parsing |
+| syscall wrapper | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` parsing / windows toolhelp snapshot, process times and exit status |
 
 The three are imported by `internal/store`, `internal/mcpsrv`, and
 `internal/sessionref` / `internal/wake` respectively. The table above is the
 basis for deciding on a version bump — the syscall wrapper especially, since its
-darwin and linux paths diverge, so a bump needs the `internal/sessionref` tests
-run on both platforms.
+darwin, linux and windows paths diverge, so a bump needs the
+`internal/sessionref` tests run on all three.
 
 ## Conditions that break this contract
 
@@ -304,8 +324,11 @@ run on both platforms.
   disables tier 3. Then the session must be named explicitly via tier 1
   (`--session`) or tier 2 (`PAGER_SESSION`).
 - **A wrapper chain deeper than 16 levels** — detection fails.
-- **Anything other than darwin/linux** — `procInfo` is unsupported, so tier 3
-  always fails. Only tiers 1 and 2 work.
+- **The host's start token cannot be read** — windows only, and it costs that
+  session tier 3 rather than the platform. See "A host without a readable token
+  is refused" above.
+- **Anything other than darwin, linux or windows** — process inspection is
+  unimplemented, so tier 3 always fails. Only tiers 1 and 2 work.
 
 All of these fail closed, and the first two surface immediately by blocking CLI
 sends outright.
