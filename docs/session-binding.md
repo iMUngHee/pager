@@ -1,9 +1,9 @@
 # 세션 바인딩 계약
 
-> I1의 선행 결정. hop 안전성 전체가 이 문서 위에 올라간다. 여기서 정한 것을 바꾸면
+> hop 안전성 전체가 이 문서 위에 올라간다. 여기서 정한 것을 바꾸면
 > `internal/sessionref`·`internal/deliver`의 확정 조건이 함께 바뀐다.
 >
-> 관련: `.agents/plans/2026-08-03-pager-core-delivery.md` (Decisions → 세션 바인딩)
+> 관련: [hooks.md](hooks.md), [../README.md](../README.md)
 
 ## 왜 우회로가 필요한가
 
@@ -19,17 +19,11 @@ CLI도 같은 문제를 겪는다. **`pager send`가 핵심 발신 경로**인�
 따라서 계약은 하나다 — **훅이 기록하고, 나머지가 조회한다.** CLI와 MCP는 같은
 resolver(`internal/sessionref`)를 공유한다.
 
-## 검증된 선례 — crux
+## 검증된 선례
 
-같은 문제를 crux가 이미 실사용으로 풀었다. 방식을 그대로 따른다.
-
-| 위치 | 역할 |
-| --- | --- |
-| `internal/infra/client/client.go` | `FromEnv()` — 호스트 툴 라벨 (`claude`/`codex`) |
-| `internal/infra/hostproc/hostproc.go` | `DetectHost`/`Instance`/`Key`/`Alive` — 호스트 프로세스 동일성 |
-| `internal/contextstore/session/active.go` | `WriteActive`/`ReadActive` — 활성 세션 포인터 |
-| `internal/adapter/hook/active.go` | `updateActive` — 훅 쓰기 경로 (best-effort) |
-| `internal/adapter/server/server.go:69` | `readActiveSession` — MCP 서버 조회 경로 |
+이 구조는 새로 고안한 것이 아니다. 같은 문제 — MCP가 호출자의 세션을 알려주지 않는다 —
+를 먼저 만난 자매 도구가 실사용으로 같은 답에 도달했다. 훅이 호스트 프로세스 동일성으로
+활성 세션 포인터를 쓰고, CLI와 MCP가 그것을 읽는다.
 
 pager가 다른 점은 **저장 위치 하나**다 (아래 "활성 바인딩은 어디 사는가").
 
@@ -157,19 +151,19 @@ tier가 1순위이고, 고아 알림이 사람에게 알려주는 것이 바로 
 
 **`sessions` 테이블 컬럼.** 별도 포인터 파일을 두지 않는다.
 
-crux가 `~/.crux/active/<key>.json`을 둔 이유는 **훅과 MCP 서버가 서로 다른 저장소를
-쓰기 때문**이다 — 서버는 메트릭 DB에 쓰고 세션 문맥은 훅에만 있으니 둘을 잇는 파일이
-필요했다. pager에는 그 전제가 없다: 훅·CLI·MCP가 **전부 같은 `~/.pager/msg.db`를 쓴다.**
+선례가 별도 포인터 파일을 둔 이유는 **훅과 MCP 서버가 서로 다른 저장소를 쓰기 때문**이다 —
+서버는 자기 DB에 쓰고 세션 문맥은 훅에만 있으니 둘을 잇는 파일이 필요했다. pager에는 그
+전제가 없다: 훅·CLI·MCP가 **전부 같은 `~/.pager/msg.db`를 쓴다.**
 포인터 파일을 두면 두 번째 저장소와 그 TTL·고아 정리가 통째로 추가 표면이 된다.
 
 ```sql
--- sessions 스키마 (I2에서 생성)
+-- sessions 테이블의 호스트 컬럼 (internal/store 스키마)
 host_client TEXT,     -- 'claude' | 'codex'
 host_pid    INTEGER,
 host_start  INTEGER   -- 플랫폼 상대 시작 토큰
 ```
 
-`heartbeat_at`이 crux의 `activeTTLms`(12h) 역할을 그대로 한다. 신선도 판정 축이
+`heartbeat_at`이 포인터 파일 방식의 TTL 역할을 그대로 한다. 신선도 판정 축이
 하나로 합쳐지므로 원자적 rename도, 별도 만료 파일도 필요 없다.
 
 ### 훅의 기록 — 최신 승자
@@ -205,7 +199,7 @@ SELECT session_id FROM sessions
 
 ## pid 재사용은 왜 오배달이 되지 않는가
 
-crux는 `hostproc.Alive`로 pid 재사용을 따로 막는다. pager에는 그 검사가 **불필요하다** —
+선례는 별도의 생존 검사로 pid 재사용을 막는다. pager에는 그 검사가 **불필요하다** —
 `host_start`가 이미 그 일을 한다:
 
 호스트가 죽고 무관한 프로세스가 그 pid를 물려받았다고 하자. 그 프로세스에서 `pager send`를
@@ -250,13 +244,13 @@ crux는 `hostproc.Alive`로 pid 재사용을 따로 막는다. pager에는 그 �
 
 | 항목 | 버전 | 근거 |
 | --- | --- | --- |
-| SQLite 드라이버 | `modernc.org/sqlite v1.50.1` | 순수 Go → CGO 불필요. crux와 동일 |
-| MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | crux가 사용하는 것과 동일 |
-| syscall 래퍼 | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` 파싱. crux 검증 버전 |
+| SQLite 드라이버 | `modernc.org/sqlite v1.50.1` | 순수 Go → CGO 불필요, 크로스 컴파일 가능 |
+| MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | stdio 서버에 필요한 최소 표면만 쓴다 |
+| syscall 래퍼 | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` 파싱 |
 
-I1 시점에는 이 세 패키지를 **import하는 코드가 아직 없다**(스토어는 I2, MCP는 I9,
-호스트 탐지는 I3). `go.mod`·`go.sum`에는 올라가 있지만 `go mod tidy`를 지금 돌리면
-제거된다. 위 표가 그 경우의 복구 기준이다.
+세 패키지는 각각 `internal/store`, `internal/mcpsrv`, `internal/sessionref`·`internal/wake`가
+import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 syscall 래퍼는 darwin과 linux의
+경로가 갈리므로, 올릴 때 두 플랫폼 모두에서 `internal/sessionref` 테스트를 돌려야 한다.
 
 ## 이 계약이 깨지는 조건
 
