@@ -13,9 +13,8 @@ pager의 보장은 "다음에 활동할 때 본다"이다. 그 "활동"을 관�
 ## 양쪽 툴이 같은 계약을 쓴다
 
 Claude Code와 Codex CLI 모두 stdin으로 JSON을 받고, stdout에
-`hookSpecificOutput.additionalContext`를 내면 호스트가 다음 턴 문맥에 접는다. 이미 쓰이고
-있는 계약이라(대협의 기존 `inject-context.sh`가 양쪽에서 같은 JSON을 출력) 크로스툴 배관이
-검증된 채로 존재한다.
+`hookSpecificOutput.additionalContext`를 내면 호스트가 다음 턴 문맥에 접는다. 두 호스트가
+같은 계약을 쓰므로 훅 하나가 양쪽에 그대로 붙고, 크로스툴 배관에 변환 계층이 필요 없다.
 
 ```json
 {

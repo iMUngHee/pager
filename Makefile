@@ -5,7 +5,8 @@
 # is exported here rather than passed per-target so a stray `go test` in a
 # subshell cannot silently link against libsqlite3 instead.
 #
-# Hook registration and MCP registration land in I10 (install/docs).
+# Hook and MCP registration are not make targets: they edit the host's own
+# config files, not this repo. README.md has the snippets.
 
 SHELL  := /bin/bash
 BINDIR ?= $(HOME)/.local/bin
