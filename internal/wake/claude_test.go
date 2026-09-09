@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -21,9 +22,18 @@ import (
 // near 104 bytes and t.TempDir() on macOS is nowhere near short enough — a test
 // that ignored this would fail with a bind error that looks like anything but a
 // path length problem.
+//
+// /tmp is the short one where it exists. Windows has no /tmp at all, so there
+// the base is left to MkdirTemp, which uses the platform's own temp directory:
+// still far shorter than t.TempDir(), whose length comes from appending the
+// test's name.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "pw")
+	base := "/tmp"
+	if runtime.GOOS == "windows" {
+		base = ""
+	}
+	dir, err := os.MkdirTemp(base, "pw")
 	if err != nil {
 		t.Fatalf("temp dir: %v", err)
 	}

@@ -868,9 +868,13 @@ func TestE2EInboxRejectsArguments(t *testing.T) {
 // Its number may be recycled later, but then the start token recorded against
 // it no longer matches and the probe still answers "not the one we recorded" —
 // which is the same verdict this test wants, by either route.
+//
+// The throwaway process is this test binary selecting no tests, rather than a
+// shell: any process that exits will do, and naming /bin/sh would have made a
+// test about start tokens depend on the platform having one.
 func deadPid(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("run throwaway process: %v", err)
 	}

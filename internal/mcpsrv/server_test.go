@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -444,13 +445,9 @@ func TestSendReportsAStrandedHolder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	// A process that has certainly exited, bound as the holder's host.
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("run throwaway process: %v", err)
-	}
 	if _, err := st.Exec(t.Context(),
 		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
-		cmd.Process.Pid, 1, "gone-session"); err != nil {
+		deadPid(t), 1, "gone-session"); err != nil {
 		t.Fatalf("bind a dead host: %v", err)
 	}
 
@@ -485,16 +482,26 @@ func roster(t *testing.T, s *session, id int) string {
 	return text(t, resp)
 }
 
-// bindDeadHost binds a session to a process that has certainly exited.
-func bindDeadHost(t *testing.T, st *store.Store, session string) {
+// deadPid returns a pid whose process has certainly exited.
+//
+// The throwaway process is this test binary selecting no tests, rather than a
+// shell: any process that exits will do, and naming /bin/sh would have made
+// these tests depend on the platform having one.
+func deadPid(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("run throwaway process: %v", err)
 	}
+	return cmd.Process.Pid
+}
+
+// bindDeadHost binds a session to a process that has certainly exited.
+func bindDeadHost(t *testing.T, st *store.Store, session string) {
+	t.Helper()
 	if _, err := st.Exec(t.Context(),
 		"UPDATE sessions SET host_client = 'claude', host_pid = ?, host_start = ? WHERE session_id = ?",
-		cmd.Process.Pid, 1, session); err != nil {
+		deadPid(t), 1, session); err != nil {
 		t.Fatalf("bind a dead host to %s: %v", session, err)
 	}
 }

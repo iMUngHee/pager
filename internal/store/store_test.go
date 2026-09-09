@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/iMUngHee/pager/internal/clock"
 )
+
+// requireUnixPerms skips a test whose subject is a Unix permission bit.
+//
+// The store and the archive hold message bodies other sessions wrote, so
+// owner-only access is a real guarantee and these tests are how it is held. It
+// is a Unix guarantee, though: on Windows os.Chmod only toggles the read-only
+// attribute and Stat reports 0666 or 0444, so the mode pager asks for is not
+// the mode it gets and no assertion about it can pass. Skipping states that;
+// asserting anyway would fail without explaining why.
+func requireUnixPerms(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not a Windows mechanism — owner-only access there needs ACLs, which pager does not set")
+	}
+}
 
 // testBase is an arbitrary fixed instant. Tests move the fake clock relative to
 // it, so nothing here depends on the wall clock.
@@ -122,6 +138,7 @@ func TestConnectionPragmas(t *testing.T) {
 }
 
 func TestDBPermissions(t *testing.T) {
+	requireUnixPerms(t)
 	s, _ := newStore(t)
 	var path string
 	if err := s.db.QueryRowContext(t.Context(), "SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&path); err != nil {
