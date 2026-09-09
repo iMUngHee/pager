@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // Limits are the delivery bounds. Every default is an estimate; no production

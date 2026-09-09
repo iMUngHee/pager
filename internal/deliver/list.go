@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // Listed is one row of `pager ls`.

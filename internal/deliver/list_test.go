@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // stampListed sets listed_at directly.

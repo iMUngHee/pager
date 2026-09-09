@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/deliver"
 )
 
 // Sockets live under a short directory on purpose. A unix socket path is capped

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/clock"
 )
 
 // testBase is an arbitrary fixed instant. Tests move the fake clock relative to

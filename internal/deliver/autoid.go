@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // A generated name alternates consonant and vowel, so it can be said out loud

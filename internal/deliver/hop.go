@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // MaxHop is the deepest causal chain pager will carry. A reply to a reply to a

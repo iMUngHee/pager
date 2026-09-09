@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // Target is a resolved delivery address. Messages are addressed to an alias;

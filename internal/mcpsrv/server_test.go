@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unghee/pager/internal/clock"
-	"github.com/unghee/pager/internal/deliver"
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 // session drives the server the way a host does: newline-delimited JSON-RPC

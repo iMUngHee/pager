@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/unghee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/store"
 )
 
 var (

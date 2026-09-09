@@ -23,7 +23,7 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
-	"github.com/unghee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/clock"
 )
 
 // The database is local-user-only and carries message bodies written by other
