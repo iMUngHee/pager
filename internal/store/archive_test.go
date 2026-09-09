@@ -277,6 +277,7 @@ func sampleRecords(n int) []Record {
 // world-readable one is the same leak the database guards against — and
 // O_CREATE's mode argument is ignored entirely when the file exists.
 func TestArchiveCorrectsExistingFileMode(t *testing.T) {
+	requireUnixPerms(t)
 	path := filepath.Join(t.TempDir(), archiveName)
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatalf("pre-create archive: %v", err)
@@ -303,6 +304,7 @@ func TestArchiveCorrectsExistingFileMode(t *testing.T) {
 // already existing would pass every other test while leaving a fresh archive
 // world-readable.
 func TestArchiveCreatesFileWith0600(t *testing.T) {
+	requireUnixPerms(t)
 	path := filepath.Join(t.TempDir(), archiveName)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("archive already exists before the test (stat error: %v)", err)
