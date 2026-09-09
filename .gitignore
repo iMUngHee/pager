@@ -1,0 +1,19 @@
+# Compiled binary. `make build` installs into ~/.local/bin, but a bare
+# `go build ./cmd/pager` drops it here.
+/pager
+*.exe
+
+# Agent planning state: per-task plans, worktree reservations, session notes.
+# Local working material, and it names other projects and people — it must not
+# reach the repo. Only a global excludesfile protected this until now, so a
+# clone on another machine would have staged it with `git add -A`.
+.agents/
+
+# The message store and its WAL sidecars. The real one lives at ~/.pager/msg.db;
+# these patterns catch the temporary stores tests and `PAGER_DB` runs leave behind.
+*.db
+*.db-wal
+*.db-shm
+
+# OS / editor noise.
+.DS_Store
