@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -90,7 +91,13 @@ func TestE2ECrossWorkspaceDelivery(t *testing.T) {
 	}
 
 	// The recipient's hook is what actually delivers it.
-	payload := `{"session_id":"claude-1","cwd":"` + repoB + `","hook_event_name":"UserPromptSubmit","prompt":"what's next?"}`
+	//
+	// The workspace goes in through %q rather than concatenation, here and in
+	// every payload below: a Windows path is full of backslashes, and pasted
+	// raw they read as JSON escapes that do not exist. The hook is fail-open,
+	// so a payload it cannot parse produces silence rather than an error —
+	// which looks exactly like a message that was never delivered.
+	payload := fmt.Sprintf(`{"session_id":"claude-1","cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"what's next?"}`, repoB)
 	out, err := capture(t, payload, "hook", "UserPromptSubmit")
 	if err != nil {
 		t.Fatalf("hook: %v", err)
@@ -166,7 +173,7 @@ func TestE2EAutoNameDelivery(t *testing.T) {
 
 	hook := func(session string) string {
 		t.Helper()
-		payload := `{"session_id":"` + session + `","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
+		payload := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"go"}`, session, dir)
 		out, err := capture(t, payload, "hook", "UserPromptSubmit")
 		if err != nil {
 			t.Fatalf("hook for %s: %v", session, err)
@@ -386,7 +393,7 @@ func TestSchemaVersionUnchanged(t *testing.T) {
 	mustRun(t, "attach", "--session", "s1", "--tool", "claude", "--root", dir)
 	baseline := schemaVersionOf(t, dbPath)
 
-	payload := `{"session_id":"s1","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
+	payload := fmt.Sprintf(`{"session_id":"s1","cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"go"}`, dir)
 	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
@@ -421,7 +428,7 @@ func TestE2EReplyCarriesCausalDepth(t *testing.T) {
 
 	mustRun(t, "send", "--session", "a", "b-box", "look at this")
 
-	payload := `{"session_id":"b","cwd":"` + dir + `","hook_event_name":"Stop"}`
+	payload := fmt.Sprintf(`{"session_id":"b","cwd":%q,"hook_event_name":"Stop"}`, dir)
 	if _, err := capture(t, payload, "hook", "Stop"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
@@ -452,7 +459,7 @@ func TestE2ETrailingHumanFlag(t *testing.T) {
 	mustRun(t, "alias", "--session", "b", "b-box")
 
 	mustRun(t, "send", "--session", "a", "b-box", "look at this")
-	payload := `{"session_id":"b","cwd":"` + dir + `","hook_event_name":"Stop"}`
+	payload := fmt.Sprintf(`{"session_id":"b","cwd":%q,"hook_event_name":"Stop"}`, dir)
 	if _, err := capture(t, payload, "hook", "Stop"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
@@ -578,7 +585,7 @@ func TestE2EListAndPrune(t *testing.T) {
 	// Deliver it, then ask the two questions that must now differ. This is the
 	// cost contract the --waiting flag exists for: once an inbox has been read,
 	// polling it should not carry the history back every time.
-	payload := `{"session_id":"b","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"anything?"}`
+	payload := fmt.Sprintf(`{"session_id":"b","cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"anything?"}`, dir)
 	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
@@ -743,7 +750,7 @@ func TestE2EWorksWithoutPMRoadmap(t *testing.T) {
 	mustRun(t, "alias", "--session", "solo", "solo-box")
 	mustRun(t, "send", "--human", "solo-box", "no project management here")
 
-	payload := `{"session_id":"solo","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"go"}`
+	payload := fmt.Sprintf(`{"session_id":"solo","cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"go"}`, dir)
 	out, err := capture(t, payload, "hook", "UserPromptSubmit")
 	if err != nil {
 		t.Fatalf("hook: %v", err)
@@ -822,7 +829,7 @@ func TestE2EInboxReportsEveryWaitingInbox(t *testing.T) {
 
 	// Delivering a-box's mail must take it off the listing entirely, since the
 	// count means waiting and nothing is waiting there any more.
-	payload := `{"session_id":"a","cwd":"` + dir + `","hook_event_name":"UserPromptSubmit","prompt":"anything?"}`
+	payload := fmt.Sprintf(`{"session_id":"a","cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"anything?"}`, dir)
 	if _, err := capture(t, payload, "hook", "UserPromptSubmit"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
