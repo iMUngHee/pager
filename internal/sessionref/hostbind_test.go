@@ -75,8 +75,12 @@ func TestDetectHostThroughShell(t *testing.T) {
 	if pid != hostPid {
 		t.Errorf("detected pid = %d, want the host process %d", pid, hostPid)
 	}
-	if start == 0 {
-		t.Error("start token is 0; pid reuse would not be detectable")
+	// A detected host must carry an identity, not just a pid: Detect refuses a
+	// match whose token it could not read, precisely so a recycled pid cannot
+	// resolve to the session that held it before.
+	if !(Instance{Pid: pid, Start: start}).Valid() {
+		t.Errorf("Detect reported a host with no usable identity (pid=%d start=%d); "+
+			"pid reuse would not be detectable", pid, start)
 	}
 }
 
@@ -230,9 +234,11 @@ func TestAliveSeparatesGoneFromUnknowable(t *testing.T) {
 	if !procInfoSupported {
 		t.Skip("this platform cannot read process info, so every answer is unknown")
 	}
-	_, start, _, ok := procInfo(os.Getpid())
-	if !ok {
-		t.Fatalf("procInfo on the test process itself failed")
+	// Through the same seam Alive uses, so the token compared here is the one
+	// it would read.
+	start, exists, known := newProcSource().startToken(os.Getpid())
+	if !exists || !known || start == 0 {
+		t.Fatalf("startToken on the test process itself = (%d, %t, %t), want a token", start, exists, known)
 	}
 
 	// A process that has certainly exited. Its pid may be recycled later, but
@@ -253,6 +259,12 @@ func TestAliveSeparatesGoneFromUnknowable(t *testing.T) {
 		{"a process that exited", Instance{Pid: dead.Process.Pid, Start: start}, false, true},
 		{"no host was ever detected", Instance{}, false, false},
 		{"pid 1 is not a host", Instance{Pid: 1, Start: start}, false, false},
+		// A pid with no token cannot be told from the next process to hold
+		// that number, so it is unknowable rather than alive. Windows can
+		// produce it: the creation time needs a handle this user may be
+		// refused. Answering "alive" here is what would let a recycled pid
+		// pass for the original.
+		{"a pid whose token was unreadable", Instance{Pid: os.Getpid()}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			alive, known := Alive(tc.inst)
@@ -271,9 +283,11 @@ func TestAliveAtMatchesAlive(t *testing.T) {
 	if !procInfoSupported {
 		t.Skip("this platform cannot read process info, so every answer is unknown")
 	}
-	_, start, _, ok := procInfo(os.Getpid())
-	if !ok {
-		t.Fatalf("procInfo on the test process itself failed")
+	// Through the same seam Alive uses, so the token compared here is the one
+	// it would read.
+	start, exists, known := newProcSource().startToken(os.Getpid())
+	if !exists || !known || start == 0 {
+		t.Fatalf("startToken on the test process itself = (%d, %t, %t), want a token", start, exists, known)
 	}
 
 	for _, inst := range []Instance{
@@ -281,6 +295,7 @@ func TestAliveAtMatchesAlive(t *testing.T) {
 		{Pid: os.Getpid(), Start: start + 1},
 		{},
 		{Pid: 1, Start: start},
+		{Pid: os.Getpid()},
 	} {
 		wantAlive, wantKnown := Alive(inst)
 		alive, known := AliveAt(inst.Pid, inst.Start)

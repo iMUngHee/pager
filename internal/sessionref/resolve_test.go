@@ -3,6 +3,7 @@ package sessionref
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 )
 
@@ -196,11 +197,65 @@ func TestInstanceValid(t *testing.T) {
 		{Instance{}, false},
 		{Instance{Pid: 1}, false}, // init is never a host
 		{Instance{Pid: -1}, false},
+		// A pid without a start token is not an identity: nothing tells it
+		// apart from the next process to be given that number.
+		{Instance{Pid: 4242}, false},
+		{Instance{Pid: 4242, Start: -1}, true}, // any non-zero token is opaque and fine
 	} {
 		if got := tc.inst.Valid(); got != tc.want {
 			t.Errorf("Instance%+v.Valid() = %v, want %v", tc.inst, got, tc.want)
 		}
 	}
+}
+
+// stubWalk is a synthetic ancestry keyed by pid, standing in for the platform
+// so a walk can be handed a process no machine produces to order.
+type stubWalk map[int]stubProc
+
+type stubProc struct {
+	ppid  int
+	start int64
+	cmd   string
+}
+
+func (s stubWalk) info(pid int) (ppid int, start int64, cmd string, ok bool) {
+	p, ok := s[pid]
+	if !ok {
+		return 0, 0, "", false
+	}
+	return p.ppid, p.start, p.cmd, true
+}
+
+// TestDetectRefusesHostWithoutStartToken is the fail-closed half of the start
+// token's job.
+//
+// A host whose token could not be read carries a pid and nothing else, and a
+// pid is not an identity: the next process to be given that number would
+// resolve to this session. Windows produces exactly this when the host runs
+// elevated and the caller does not, so the walk has to refuse rather than
+// record it. The pair matters more than either case — the only difference
+// between them is the token, so the refusal cannot be passing for some other
+// reason.
+func TestDetectRefusesHostWithoutStartToken(t *testing.T) {
+	t.Setenv("PAGER_CLIENT", Claude)
+	host := os.Getppid()
+
+	t.Run("refused without a token", func(t *testing.T) {
+		src := stubWalk{host: {ppid: 1, cmd: "claude /usr/bin/claude"}}
+		client, inst, ok := detectFrom(src)
+		if ok || client != Unknown || inst.Valid() {
+			t.Errorf("detectFrom() = (%q, %+v, %v), want no host: a pid with no start token "+
+				"cannot be told apart from the next process to hold it", client, inst, ok)
+		}
+	})
+
+	t.Run("accepted with one", func(t *testing.T) {
+		src := stubWalk{host: {ppid: 1, start: 987654321, cmd: "claude /usr/bin/claude"}}
+		client, inst, ok := detectFrom(src)
+		if !ok || client != Claude || inst != (Instance{Pid: host, Start: 987654321}) {
+			t.Errorf("detectFrom() = (%q, %+v, %v), want the claude host", client, inst, ok)
+		}
+	})
 }
 
 // TestDetectPinnedToUnknownClientFailsClosed: naming a client pager does not
