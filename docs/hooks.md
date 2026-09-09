@@ -1,20 +1,25 @@
-# 훅 계약 — 이벤트 · 입력 · 출력 매트릭스
+# The hook contract — event / input / output matrix
 
-> 배달은 전적으로 훅이 한다. MCP는 pull 모델이라 서버가 수신자의 턴을 깨울 수 없고,
-> 주입은 훅으로만 가능하다.
+[English](hooks.md) · [한국어](hooks.ko.md)
+
+> Delivery is entirely the hook's job. MCP is a pull model, so a server cannot
+> wake the recipient's turn, and injection is only possible from a hook.
 >
-> 관련: [session-binding.md](session-binding.md)
+> See also: [session-binding.md](session-binding.md)
 
-## 왜 훅인가
+## Why hooks
 
-pager의 보장은 "다음에 활동할 때 본다"이다. 그 "활동"을 관측할 수 있는 유일한 지점이 훅이다.
-수신 세션이 훅을 한 번도 실행하지 않으면 **출력 시도는 0회**다 — 이것이 보장의 조건부 성격이다.
+pager's guarantee is "you see it the next time you do anything". A hook is the
+only place that "anything" can be observed. If the recipient session never runs
+a hook, **the number of output attempts is zero** — this is what makes the
+guarantee conditional.
 
-## 양쪽 툴이 같은 계약을 쓴다
+## Both tools use the same contract
 
-Claude Code와 Codex CLI 모두 stdin으로 JSON을 받고, stdout에
-`hookSpecificOutput.additionalContext`를 내면 호스트가 다음 턴 문맥에 접는다. 두 호스트가
-같은 계약을 쓰므로 훅 하나가 양쪽에 그대로 붙고, 크로스툴 배관에 변환 계층이 필요 없다.
+Claude Code and Codex CLI both take JSON on stdin, and both fold
+`hookSpecificOutput.additionalContext` from stdout into the next turn's
+context. Because the two hosts share one contract, a single hook attaches to
+both as-is and cross-tool plumbing needs no translation layer.
 
 ```json
 {
@@ -25,110 +30,128 @@ Claude Code와 Codex CLI 모두 stdin으로 JSON을 받고, stdout에
 }
 ```
 
-## 이벤트 매트릭스
+## Event matrix
 
-| 이벤트 | 세션 기록 | 인과 리셋 | 메시지 배달 | 고아 별칭 힌트 |
+| Event | Record session | Reset causality | Deliver messages | Orphan-alias hint |
 | --- | --- | --- | --- | --- |
-| `UserPromptSubmit` | ✅ | **프롬프트 본문이 있고, pager 자신의 poke가 아닐 때만** | ✅ | ✅ (세션당 1회) |
-| `SessionStart` | ✅ | ❌ | ✅ | ✅ (세션당 1회) |
+| `UserPromptSubmit` | ✅ | **only with a prompt body, and only if it is not pager's own poke** | ✅ | ✅ (once per session) |
+| `SessionStart` | ✅ | ❌ | ✅ | ✅ (once per session) |
 | `Stop` | ✅ | ❌ | ✅ | ❌ |
 | `SubagentStop` | ✅ | ❌ | ✅ | ❌ |
 
-**Stop 계열에서 고아 힌트를 내지 않는 이유** — Stop 훅의 출력은 대화를 계속시킨다. 배달할
-메시지도 없이 힌트만 내면 세션이 깨어나 "수신함이 오프라인입니다"만 읽고 할 일이 없다.
-비용을 쓰면서 아무것도 전달하지 않는 턴이다. 단 **배달 자체는 Stop에서도 한다** — 억제 대상은
-힌트뿐이다.
+**Why the Stop family emits no orphan hint** — output from a Stop hook keeps
+the conversation going. Emitting a hint with no message to deliver wakes the
+session up to read "your inbox is offline" and nothing to act on: a turn that
+spends budget and delivers nothing. **Delivery itself still happens on Stop** —
+only the hint is suppressed.
 
-**인과 리셋의 판정** — 세 조건을 모두 만족할 때만 리셋한다. 이벤트가 `UserPromptSubmit`이고,
-페이로드의 `prompt`가 공백이 아니고, 그 `prompt`에 `deliver.PokeSentinel`이 없을 때다. 호스트가
-Stop 주입 뒤 스스로 재개하는 경우는 자기 프롬프트 본문이 없으므로 리셋되지 않고, 그때 나가는
-발신은 여전히 `caused`로 계산된다.
+**How a causality reset is decided** — all three conditions must hold. The
+event is `UserPromptSubmit`, the payload's `prompt` is not blank, and that
+`prompt` does not contain `deliver.PokeSentinel`. A host that resumes itself
+after a Stop injection has no prompt body of its own, so it does not reset, and
+sends going out then still count as `caused`.
 
-**세 번째 조건이 있는 이유** — wake가 두드리는 poke는 호스트의 메시지 주입 경로로 들어오므로,
-훅 경계에서는 사람이 엔터를 친 것과 **구조적으로 구별되지 않는다.** 예전 판정으로는 poke 하나가
-수신자의 `causal_epoch`을 올리고 `last_inbound_id`를 지웠다. 실측값이다 — 4→5, 51→NULL.
+**Why the third condition exists** — a poke from wake arrives through the
+host's own message-injection path, so at the hook boundary it is
+**structurally indistinguishable from a human pressing enter.** Under the older
+rule, a single poke raised the recipient's `causal_epoch` and cleared
+`last_inbound_id`. Those are measured values — 4→5, 51→NULL.
 
-그 결과가 둘 다 나빴다. 발신자가 수신자의 인과 상태를 원격으로 리셋할 수 있게 되고(지금까지
-수신 세션의 사람만 하던 일이다), 인과 대표가 사라지면 수신자의 다음 회신이 hop 0 / `human`으로
-계산되어 `maxCausedPerPair`(10)가 아니라 `maxHumanPerWindow`(30) 예산으로 청구된다. 핑퐁 방어가
-약해지는 방향이다.
+Both consequences were bad. A sender could remotely reset a recipient's causal
+state, something only the human at the receiving session could do until then;
+and with the causal representative gone, the recipient's next reply counted as
+hop 0 / `human`, billing against the `maxHumanPerWindow` budget (30) instead of
+`maxCausedPerPair` (10). That direction weakens the ping-pong defence.
 
-> 이 판정은 예전에 핑퐁 방어에서 가장 약한 고리였다. "호스트가 재개할 때 합성 프롬프트를 넣기
-> 시작하면"이라는 가정을 적어두었는데, wake가 정확히 그것을 현실로 만들었다. 센티넬 조건이 그
-> 구멍을 닫는다. 남은 방어선은 여전히 **세는 것밖에 하지 않는 breaker**다.
+> This decision used to be the weakest link in the ping-pong defence. The
+> assumption written down was "if the host starts injecting synthetic prompts
+> when it resumes" — and wake made exactly that real. The sentinel condition
+> closes the hole. The remaining line of defence is still the breaker, which
+> does nothing but count.
 
-센티넬을 흉내내 리셋을 억제하는 것은 가능하지만 **위조자에게 불리하다.** 억제되면 회신이 인과
-깊이를 유지해 더 좁은 예산으로 청구된다 — 완화가 아니라 강화 방향이라 악용할 이유가 없다.
+Imitating the sentinel to suppress a reset is possible, but **it works against
+the forger.** Suppressed means the reply keeps its causal depth and bills
+against the narrower budget — a strengthening, not a weakening, so there is no
+reason to abuse it.
 
-## 입력 필드
+## Input fields
 
-| 필드 | Claude Code | Codex | pager의 용도 |
+| Field | Claude Code | Codex | What pager uses it for |
 | --- | --- | --- | --- |
-| `session_id` | ✅ | ✅ | 1순위 세션 해석. 없으면 훅은 아무것도 하지 않는다 |
-| `prompt` | ✅ | ✅ | 인과 리셋 판정 |
-| `cwd` | ✅ | ✅ | workspace root (별칭 격리 축) |
-| `project_dir` | — | ✅ | workspace root (우선) |
-| `transcript_path` | ✅ | ✅ | 미사용 (1단계 범위 밖) |
+| `session_id` | ✅ | ✅ | Session resolution tier 1. Without it the hook does nothing |
+| `prompt` | ✅ | ✅ | Deciding a causality reset |
+| `cwd` | ✅ | ✅ | Workspace root (the alias isolation axis) |
+| `project_dir` | — | ✅ | Workspace root (preferred) |
+| `transcript_path` | ✅ | ✅ | Unused (outside phase-one scope) |
 
-workspace root 해석 순서: `project_dir` → `cwd` → `CLAUDE_PROJECT_DIR` → 프로세스 작업 디렉토리.
+Workspace root resolution order: `project_dir` → `cwd` → `CLAUDE_PROJECT_DIR` →
+the process working directory.
 
-## 한 번의 훅 실행이 하는 일
+## What one hook run does
 
-순서에 의미가 있다.
+The order is meaningful.
 
 ```
-1. 세션 기록      ← 아직 아무도 안 보낸 세션도 주소가 생겨야 별칭을 붙일 수 있다
-2. 이름 발급      ← 이름 없는 세션에만. 작업공간을 모르면 건너뛴다
-3. 인과 리셋      ← 배달보다 먼저. 리셋 뒤 도착분이 새 체인의 원인이 된다
-4. 후보 조회      ← claim 없음. 트랜잭션 밖
-5. 예산 선정      ← 탈락분은 건드리지 않는다 (starvation 방지)
-6. 선정분 claim   ← BEGIN IMMEDIATE 한 트랜잭션
-7. stdout 출력    ← 이름을 방금 받았다면 그 사실을 맨 앞에 한 줄 붙인다
-8. 확정           ← 출력 뒤. 사이에서 죽으면 lease 만료 후 재시도된다
-9. prune 기회     ← gate 선점에 성공한 훅 하나만
+1. record session    ← a session nobody has written to still needs an address before an alias can attach
+2. issue a name      ← only for sessions without one. Skipped when the workspace is unknown
+3. reset causality   ← before delivery. What arrives after the reset causes the new chain
+4. query candidates  ← no claim. Outside the transaction
+5. select by budget  ← rejects are left untouched (starvation guard)
+6. claim the selected ← one BEGIN IMMEDIATE transaction
+7. write stdout      ← if a name was just issued, prepend one line saying so
+8. confirm           ← after the write. Dying in between means a retry once the lease expires
+9. prune opportunity ← only the one hook that wins the gate
 ```
 
-**8번이 7번 뒤인 것이 핵심이다.** 먼저 확정하면 출력 전에 죽었을 때 메시지가 그냥 사라진다.
+**Step 8 coming after step 7 is the crux.** Confirming first would lose the
+message outright if the process died before writing.
 
-2번은 이 실행에서 이름을 **처음 준 경우에만** 7번에 한 줄을 만든다. 그 뒤 어느 단계에서 조기
-반환하면 그 소개는 유실되고 다시 시도하지 않는다 — 이름은 이미 저장돼 있으므로 기능이 깨지는
-것은 없고, 정확히 한 번을 보장하려고 상태를 더 두지 않는다. 규칙과 근거는
-[session-binding.md](session-binding.md)에 있다.
+Step 2 produces a line in step 7 **only when this run is what first gave the
+name**. If any later step returns early, that introduction is lost and is not
+retried — the name is already stored, so nothing functional breaks, and pager
+does not keep extra state just to guarantee exactly-once here. The rules and
+reasoning are in [session-binding.md](session-binding.md).
 
 ## fail-open
 
-모든 경로가 fail-open이다 — **exit 0, stdout 무출력**.
+Every path is fail-open — **exit 0, no stdout**.
 
-| 상황 | 결과 |
+| Situation | Result |
 | --- | --- |
-| 손상된 JSON / 빈 입력 | 조용히 종료 |
-| `session_id` 없음 | 조용히 종료 |
-| DB 열기 실패 · 권한 없음 | 조용히 종료 |
-| 배달 중 오류 | 조용히 종료 |
-| 이름 발급 실패 | 무시하고 계속 (이름 없는 세션도 동작한다. 다음 훅이 재시도) |
-| prune 실패 (아카이브 쓰기 실패 포함) | 무시하고 계속. 다만 **즉시 재시도되지 않는다** — 아래를 보라 |
+| Malformed JSON / empty input | exit quietly |
+| No `session_id` | exit quietly |
+| Cannot open the DB / no permission | exit quietly |
+| Error during delivery | exit quietly |
+| Name issuance failed | ignore and continue (a nameless session still works; the next hook retries) |
+| prune failed (including a failed archive write) | ignore and continue, but **it is not retried immediately** — see below |
 
-대가는 **고장이 세션 안에서 보이지 않는다**는 것이다. 확인 수단은 `pager whoami`(호스트·세션·이름),
-`pager who`(다른 세션들), `pager ls`(큐), 그리고 prune에 한해 `pager prune`이다. 수동 prune은
-게이트를 우회하고 에러를 그대로 표면화하므로, 훅이 조용히 삼킨 실패를 보는 유일한 창구다.
+The cost is that **breakage is invisible from inside the session.** You check
+with `pager whoami` (host, session, name), `pager who` (other sessions),
+`pager ls` (the queue), and for prune specifically, `pager prune`. A manual
+prune bypasses the gate and surfaces errors directly, making it the only window
+onto failures the hook swallowed.
 
-### prune 실패 뒤 재시도 시점
+### When a failed prune is retried
 
-실패한 prune은 완료 시각을 갱신하지 않지만 **시작 시각은 이미 남겨두고 실패한다.** 게이트 선점은
-"마지막 완료가 24시간 전"과 "마지막 시작이 lease보다 오래됨"을 함께 요구하므로, 다음에 게이트를
-잡을 수 있는 것은 **시작 시각으로부터 10분이 지난 뒤 처음 도는 훅**이다. 그 사이의 모든 훅은
-게이트에서 탈락한다.
+A failed prune does not update the completion time, but **it has already
+recorded its start time before failing.** Winning the gate requires both "the
+last completion was 24 hours ago" and "the last start is older than the lease",
+so the next run that can take the gate is **the first hook that runs 10 minutes
+after that start time.** Every hook in between loses the gate.
 
-억제되는 것은 **자동 prune뿐이다.** 배달을 비롯한 훅의 나머지 단계와 수동 `pager prune`은 영향받지
-않는다.
+Only **automatic prune** is suppressed. The rest of the hook's steps, delivery
+included, and a manual `pager prune` are unaffected.
 
-prune은 지울 메시지를 파일로 남긴 뒤에만 삭제하므로(`~/.pager/archive.jsonl`), 아카이브 쓰기 실패는
-곧 prune 실패다. 아무것도 지워지지 않으며 데이터는 DB에 그대로 남는다. 자세한 것은 README의
-"보관과 아카이브"를 보라.
+prune deletes only after writing the doomed messages to a file
+(`~/.pager/archive.jsonl`), so a failed archive write is a failed prune.
+Nothing is deleted and the data stays in the database. Details in
+[reference.md](reference.md#retention-and-archive).
 
-훅 한 번의 실행 시간은 5초로 제한한다. 잠긴 DB에 매달려 세션을 붙잡는 것이 fail-open이 막으려던
-바로 그 상황이기 때문이다.
+One hook run is limited to 5 seconds. Hanging on a locked database while
+holding up a session is exactly the situation fail-open exists to prevent.
 
-## 등록
+## Registration
 
-훅 등록 명령은 [README](../README.md)에 있다.
+The registration commands are in [../README.md](../README.md#install), and
+which events to register is in
+[reference.md](reference.md#which-hook-events-to-register).

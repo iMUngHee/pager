@@ -1,193 +1,223 @@
-# 세션 바인딩 계약
+# The session binding contract
 
-> hop 안전성 전체가 이 문서 위에 올라간다. 여기서 정한 것을 바꾸면
-> `internal/sessionref`·`internal/deliver`의 확정 조건이 함께 바뀐다.
+[English](session-binding.md) · [한국어](session-binding.ko.md)
+
+> All of hop safety rests on this document. Changing what is decided here
+> changes the confirmation conditions in `internal/sessionref` and
+> `internal/deliver` along with it.
 >
-> 관련: [hooks.md](hooks.md), [../README.md](../README.md)
+> See also: [hooks.md](hooks.md), [reference.md](reference.md)
 
-## 왜 우회로가 필요한가
+## Why a workaround is needed at all
 
-**MCP 프로토콜은 호출자의 `session_id`를 주지 않는다.** 세션 5개는 MCP 서버 프로세스
-5개(세션당 인스턴스 하나)이고, 환경변수에도 session_id가 없다. 그래서 MCP 경로는 자기
-세션을 스스로 알 수 없다.
+**The MCP protocol does not give the caller's `session_id`.** Five sessions
+means five MCP server processes (one instance per session), and there is no
+session id in the environment either. So the MCP path cannot know its own
+session.
 
-CLI도 같은 문제를 겪는다. **`pager send`가 핵심 발신 경로**인데, 에이전트가 Bash 툴로
-부르는 CLI 역시 자기 session_id를 모른다. MCP만 해결하면 `pager send`가 전부
-`unattributed`로 자기 정책에 막힌다.
+The CLI has the same problem. **`pager send` is the primary send path**, and a
+CLI invoked by an agent's Bash tool does not know its own session id either.
+Solving only MCP would leave every `pager send` `unattributed` and blocked by
+pager's own policy.
 
-세션 문맥을 아는 유일한 주체는 **훅**이다. 훅은 stdin으로 `session_id`를 받는다.
-따라서 계약은 하나다 — **훅이 기록하고, 나머지가 조회한다.** CLI와 MCP는 같은
-resolver(`internal/sessionref`)를 공유한다.
+The only party that knows the session context is **the hook**. Hooks receive
+`session_id` on stdin. So there is one contract — **the hook records, everyone
+else looks it up.** The CLI and MCP share one resolver
+(`internal/sessionref`).
 
-## 검증된 선례
+## A proven precedent
 
-이 구조는 새로 고안한 것이 아니다. 같은 문제 — MCP가 호출자의 세션을 알려주지 않는다 —
-를 먼저 만난 자매 도구가 실사용으로 같은 답에 도달했다. 훅이 호스트 프로세스 동일성으로
-활성 세션 포인터를 쓰고, CLI와 MCP가 그것을 읽는다.
+This structure was not invented here. A sibling tool that hit the same problem
+first — MCP not telling you the caller's session — arrived at the same answer
+in production use: the hook writes an active-session pointer keyed by host
+process identity, and the CLI and MCP read it.
 
-pager가 다른 점은 **저장 위치 하나**다 (아래 "활성 바인딩은 어디 사는가").
+Where pager differs is **one thing: where that pointer lives** (see "Where the
+active binding lives" below).
 
-## 호스트 프로세스 동일성
+## Host process identity
 
-훅과 CLI/MCP는 서로 다른 프로세스다. 둘이 같은 세션을 가리키려면 **같은 호스트를
-독립적으로 같은 값으로 지목**해야 한다.
+The hook and the CLI/MCP are different processes. For the two to point at the
+same session, they must **independently name the same host with the same
+value.**
 
 ```
 Instance{ Pid int, Start int64 }
 ```
 
-`Start`는 플랫폼 상대 프로세스 시작 토큰이다 — darwin은 `kern.proc.pid` sysctl의
-`P_starttime`(ms), linux는 `/proc/<pid>/stat` 22번 필드(starttime jiffies). 단위는
-무의미하고 **같은 머신의 두 프로세스가 같은 값을 읽는다는 안정성만** 의미가 있다.
+`Start` is a platform-relative process start token — on darwin, `P_starttime`
+(ms) from the `kern.proc.pid` sysctl; on linux, field 22 (starttime jiffies) of
+`/proc/<pid>/stat`. The unit is meaningless. **All that matters is the
+stability of two processes on the same machine reading the same value.**
 
-탐지는 **조상 체인 상향 탐색**이다:
+Detection walks **up the ancestor chain**:
 
 ```
 pid = os.Getppid()
-최대 16단 상향:
+up to 16 levels up:
     procInfo(pid) → (ppid, start, cmd)
-    cmd의 comm 또는 argv0의 basename이 클라이언트명과 일치하면 → Instance{pid, start}
-    아니면 pid = ppid
-16단 안에 없으면 → 탐지 실패
+    if the basename of cmd's comm or argv0 matches the client name → Instance{pid, start}
+    otherwise pid = ppid
+not found within 16 levels → detection failed
 ```
 
-- MCP 서버는 보통 호스트의 **직계 자식**이다.
-- 에이전트 Bash 툴이 실행한 CLI는 셸을 한두 단 거친 **자손**이다.
-- 훅도 마찬가지로 자손이다.
+- The MCP server is usually a **direct child** of the host.
+- A CLI run by the agent's Bash tool is a **descendant** one or two shells down.
+- Hooks are descendants in the same way.
 
-세 경로가 모두 같은 조상에 도달하므로 같은 `Instance`를 얻는다.
+All three paths reach the same ancestor, so all three get the same `Instance`.
 
-**전체 argv를 매칭에 쓰지 않는다.** 훅 명령의 인자에는 `~/.codex` 같은 경로가 들어갈 수
-있어서, argv 전체를 보면 codex가 아닌 프로세스를 codex 호스트로 오인한다. `comm`과
-`argv0`만 본다.
+**The full argv is not used for matching.** A hook command's arguments can
+contain a path like `~/.codex`, so looking at the whole argv would mistake a
+non-codex process for a codex host. Only `comm` and `argv0` are examined.
 
-호스트 툴 라벨(`claude`/`codex`)은 `PAGER_CLIENT` 환경변수를 먼저 보고, 없으면 부모
-프로세스 이름으로 폴백한다. `PAGER_` 접두사는 `CONTEXT_` 접두사가 아니므로 Claude Code의
-`CONTEXT_*` 환경변수 스크럽 대상이 아니다.
+The host tool label (`claude`/`codex`) checks the `PAGER_CLIENT` environment
+variable first and falls back to the parent process name. The `PAGER_` prefix
+is not the `CONTEXT_` prefix, so it is not subject to Claude Code's `CONTEXT_*`
+environment scrubbing.
 
-## 해석 순위 — CLI·MCP 공통
+## Resolution tiers — shared by CLI and MCP
 
-`internal/sessionref`의 단일 진입점이 이 순서대로 시도한다. **모든 발신 경로가 같은
-순위를 쓴다** — CLI든 MCP든 예외가 없다.
+The single entry point in `internal/sessionref` tries these in order. **Every
+send path uses the same tiers** — CLI or MCP, no exceptions.
 
-| 순위 | 방법 | 적용 경로 |
+| Tier | Method | Where it applies |
 | --- | --- | --- |
-| 1 | `--session <id>` 인자 | 훅 (자기 stdin에 session_id가 있다), 스크립트 |
-| 2 | `PAGER_SESSION` 환경변수 | 훅이 심어두면 그 세션의 자식 프로세스 전부가 상속 |
-| 3 | 호스트 탐지 → 훅이 기록한 활성 세션 조회 | MCP 서버, 에이전트가 Bash로 부른 CLI |
-| 4 | 실패 → `unattributed` | 기본 **거부** (`--human` 없으면) |
+| 1 | `--session <id>` argument | Hooks (their own stdin has the session_id), scripts |
+| 2 | `PAGER_SESSION` environment variable | Planted by the hook, inherited by every child process of that session |
+| 3 | Host detection → look up the active session the hook recorded | MCP servers, a CLI the agent ran through Bash |
+| 4 | Failure → `unattributed` | **Refused** by default (without `--human`) |
 
-## 주소 레이어는 둘이다 — 자동 이름은 세 번째가 아니다
+## There are two addressing layers — the automatic name is not a third
 
-| 레이어 | 값 | 성질 |
+| Layer | Value | Nature |
 | --- | --- | --- |
-| 세션 | `session_id` | 호스트가 주는 것. 불변, 사람이 읽을 것은 아님 |
-| 이름 | `aliases.alias` | 논리적 주소. **자동으로 하나 붙고**, 사람이 더 붙일 수 있다 |
+| Session | `session_id` | Given by the host. Immutable, not meant for humans |
+| Name | `aliases.alias` | The logical address. **One attaches automatically**, and a human can add more |
 
-자동 이름은 별도 레이어가 아니라 **이름 레이어의 기본값**이다. 그래야 하는 이유는 배달 경로에
-있다 — `Candidates`와 `revalidate`가 `messages JOIN aliases ON alias`로 수신자를 찾으므로
-(`internal/deliver/lease.go`), 별칭 행이 아닌 주소는 수신 자체가 불가능하다. 자동 이름을
-`sessions` 컬럼으로 두면 claim 재검증 SQL에 UNION을 넣어야 하고, 그것은 이 문서가 고정한
-계약 중 가장 위험한 것을 건드리는 일이다.
+The automatic name is not a separate layer but **the default value of the name
+layer.** The reason lies in the delivery path: `Candidates` and `revalidate`
+find the recipient with `messages JOIN aliases ON alias`
+(`internal/deliver/lease.go`), so an address that is not an alias row cannot
+receive at all. Keeping the automatic name in a `sessions` column would require
+a UNION in the claim-revalidation SQL, and that touches the most dangerous of
+the contracts this document pins down.
 
-발급 규칙:
+Issuance rules:
 
-- **언제** — 이름이 없는 세션이 훅을 돌릴 때마다, 그리고 `pager attach` 때. `SessionStart`는
-  권장 등급이므로 그것만으로는 부족하다.
-- **작업공간을 모르면 발급하지 않는다.** alias 행은 삽입 시점의 `root`·`tool`을 복사해 고정하고
-  이후 아무도 갱신하지 않는다. 탐지 실패 상태로 붙이면 그 이름은 고아 발견에서 사라지고 claim으로도
-  이전되지 않는다. 판정은 호출자가 들고 있는 값이 아니라 **저장된 `sessions` 행**으로 한다 —
-  `RecordSession`이 빈 값으로 기존 값을 지우지 않으므로, 전에 `attach`가 채워둔 세션은 이번 훅의
-  탐지가 실패해도 자격이 있다.
-- **동시성** — 발급은 `NOT EXISTS (이 세션의 별칭)`을 조건에 넣은 단일 INSERT다. 검사와 삽입을
-  나누면 동시 훅 둘이 각자 자기가 처음이라고 판단해 한 세션이 이름 둘을 갖는다.
+- **When** — every time a session without a name runs a hook, and on
+  `pager attach`. `SessionStart` is only a recommended grade, so it alone is not
+  enough.
+- **No name is issued when the workspace is unknown.** An alias row copies and
+  pins the `root` and `tool` at insertion time and nobody updates it afterwards.
+  Attaching one while detection has failed makes that name disappear from
+  orphan discovery, and claim will not transfer it either. The verdict comes
+  from **the stored `sessions` row**, not from the value the caller holds —
+  since `RecordSession` does not erase existing values with blanks, a session an
+  earlier `attach` filled in stays eligible even if this hook's detection fails.
+- **Concurrency** — issuance is a single INSERT with
+  `NOT EXISTS (an alias for this session)` in its condition. Splitting the check
+  from the insert lets two concurrent hooks each decide they are first, giving
+  one session two names.
 
-### 어느 이름이 그 세션의 이름인가
+### Which name is *the* name for that session
 
-`ORDER BY updated_at DESC, alias` — **나중에 정해진 이름이 이긴다.** 자동 이름은 세션이 시작할
-때 붙으므로 사람이 나중에 고른 이름이 항상 그 뒤에 온다.
+`ORDER BY updated_at DESC, alias` — **the name decided later wins.** The
+automatic name attaches when the session starts, so a name a human chose later
+always comes after it.
 
-그래서 `SetAlias`와 `ClaimAlias`는 시계를 그대로 쓰지 않고 **대상 세션의 기존 이름들보다 엄격히
-큰 값**을 쓴다: `max(now, (SELECT max(updated_at) ... WHERE session_id = 대상) + 1)`. 시계는
-밀리초라 두 쓰기가 같은 값에 떨어질 수 있고, 그러면 타이브레이크가 알파벳순으로 내려가 자동
-이름이 이겨버린다.
+That is why `SetAlias` and `ClaimAlias` do not use the clock as-is but a value
+**strictly greater than the target session's existing names**:
+`max(now, (SELECT max(updated_at) ... WHERE session_id = target) + 1)`. The
+clock has millisecond resolution, so two writes can land on the same value, and
+then the tiebreak falls to alphabetical order and the automatic name wins.
 
-### 모호성은 이름이 아니라 세션 단위다 — 단, 세션을 지목하는 tier에서만
+### Ambiguity is per session, not per name — but only in tiers that name a session
 
-한 세션이 이름을 여럿 갖게 되면서 타겟 해석이 바뀌었다.
+Letting one session hold several names changed how targets resolve.
 
-| tier | 지목 대상 | 복수 행일 때 |
+| Tier | What it names | On multiple rows |
 | --- | --- | --- |
-| `alias` | 이름 | 불가능 (기본 키) |
-| `session` | **세션** | 같은 세션이므로 대표 이름으로 접는다 |
-| `pm_ref` | **세션** | 전부 같은 세션이면 접고, 다른 세션이 섞이면 `AmbiguousError` |
-| `live substring` | 살아있는 세션의 이름 패턴 | 후보를 보여주고 실패 — 사람이 고를 문제다 |
-| `substring` | 이름 패턴 | 후보를 보여주고 실패 — 어느 이름을 말하는지 알 수 없다 |
+| `alias` | a name | impossible (primary key) |
+| `session` | **a session** | same session, so fold to a representative name |
+| `pm_ref` | **a session** | fold if all the same session; `AmbiguousError` if different sessions are mixed in |
+| `live substring` | a name pattern among live sessions | show candidates and fail — this is a human's choice |
+| `substring` | a name pattern | show candidates and fail — there is no way to know which name was meant |
 
-접기 조건에 "`session_id`가 비어있지 않을 것"이 들어간다. 고아 별칭은 세션이 없고, 그 둘은
-같은 값(빈 문자열)으로 비교되지만 실제로는 서로 다른 수신함이다.
+The folding condition includes "`session_id` is not empty". Orphan aliases have
+no session, and two of them compare equal on that value (the empty string) while
+actually being different inboxes.
 
-### 부분일치가 두 층인 이유
+### Why substring matching has two layers
 
-**이름은 회수되지 않는다.** 한 번이라도 돌아간 세션은 이름을 하나씩 남기고, 그 이름은 세션이
-끝난 뒤에도 그대로 있다. 부분일치가 한 층뿐이면 **사람이 고르는 집합과 참조가 해석되는 집합이
-갈라진다** — `pager who`는 살아있는 것만 보여주는데 해석은 죽은 것까지 상대한다. 그러면 배울
-당시에는 유일했던 축약이 몇 주 전에 끝난 세션의 이름과 부딪히기 시작하고, 그 분자는 시간이
-지날수록 커지기만 한다.
+**Names are never reclaimed.** Every session that ever ran leaves a name behind,
+and that name stays after the session ends. With only one substring layer,
+**the set a human picks from and the set a reference resolves against drift
+apart** — `pager who` shows only live ones while resolution contends with dead
+ones too. An abbreviation that was unique when learned then starts colliding
+with the name of a session that ended weeks ago, and that denominator only
+grows with time.
 
-`live substring`이 staleness 기준(`heartbeat_at >= now - staleAfter`)을 걸어 살아있는 이름만
-본다. 여기서 여러 건이 나오면 **다음 tier로 넘어가지 않고 실패한다** — 살아있는 이름끼리
-겹치는 것은 사람이 답할 진짜 질문이고, 범위를 넓히면 아무도 기다리지 않는 이름만 후보에
-더해질 뿐이다.
+`live substring` applies a staleness bound (`heartbeat_at >= now - staleAfter`)
+so it sees only live names. Several matches here **fail rather than falling
+through to the next tier** — overlap among live names is a real question for a
+human to answer, and widening the scope would only add candidates nobody is
+waiting behind.
 
-넓은 `substring`이 뒤에 남아 있으므로 **세션이 떠난 이름도 여전히 부를 수 있다.** 이어받기는
-그 수신함에 메일이 쌓이는 데서 시작하므로 도달 불가능해지면 안 된다. 달라진 것은 도달 가능성이
-아니라 우선순위다.
+Because the broad `substring` tier remains behind it, **a name whose session has
+left is still callable.** Handover starts with mail piling up in that inbox, so
+it must not become unreachable. What changed is priority, not reachability.
 
-이 변경은 패턴이 매칭되는 방식만 건드린다. **이름을 정확히 부르는 경로는 그대로다** — `alias`
-tier가 1순위이고, 고아 알림이 사람에게 알려주는 것이 바로 그 정확한 이름이다.
+This affects only how patterns match. **Calling a name exactly is unchanged** —
+the `alias` tier is first, and an exact name is precisely what the orphan notice
+tells the human.
 
-## 활성 바인딩은 어디 사는가
+## Where the active binding lives
 
-**`sessions` 테이블 컬럼.** 별도 포인터 파일을 두지 않는다.
+**In `sessions` table columns.** There is no separate pointer file.
 
-선례가 별도 포인터 파일을 둔 이유는 **훅과 MCP 서버가 서로 다른 저장소를 쓰기 때문**이다 —
-서버는 자기 DB에 쓰고 세션 문맥은 훅에만 있으니 둘을 잇는 파일이 필요했다. pager에는 그
-전제가 없다: 훅·CLI·MCP가 **전부 같은 `~/.pager/msg.db`를 쓴다.**
-포인터 파일을 두면 두 번째 저장소와 그 TTL·고아 정리가 통째로 추가 표면이 된다.
+The precedent kept a separate pointer file because **its hook and MCP server
+used different stores** — the server wrote to its own database while session
+context existed only in the hook, so a file was needed to join them. pager has
+no such premise: the hook, the CLI and MCP **all write the same
+`~/.pager/msg.db`.** A pointer file would add a second store, plus its TTL and
+orphan cleanup, as entirely new surface.
 
 ```sql
--- sessions 테이블의 호스트 컬럼 (internal/store 스키마)
+-- host columns on the sessions table (internal/store schema)
 host_client TEXT,     -- 'claude' | 'codex'
 host_pid    INTEGER,
-host_start  INTEGER   -- 플랫폼 상대 시작 토큰
+host_start  INTEGER   -- platform-relative start token
 ```
 
-`heartbeat_at`이 포인터 파일 방식의 TTL 역할을 그대로 한다. 신선도 판정 축이
-하나로 합쳐지므로 원자적 rename도, 별도 만료 파일도 필요 없다.
+`heartbeat_at` plays exactly the TTL role the pointer-file approach needed.
+Freshness collapses onto one axis, so there is no atomic rename and no separate
+expiry file.
 
-### 훅의 기록 — 최신 승자
+### What the hook writes — last writer wins
 
-같은 호스트에서 `/clear`나 resume을 하면 **호스트 pid는 그대로인데 session_id가 바뀐다.**
-그래서 기록은 단순 UPDATE가 아니라 **키 이전**이어야 한다. 두 문장을 한 트랜잭션에서:
+Running `/clear` or a resume on the same host **keeps the host pid and changes
+the session_id.** So recording has to be a **key transfer**, not a plain
+UPDATE. Two statements in one transaction:
 
 ```sql
--- 1) 이 호스트 키를 들고 있던 다른 세션에서 떼어낸다
+-- 1) detach this host key from whichever other session held it
 UPDATE sessions SET host_pid = NULL, host_start = NULL
  WHERE host_client = :c AND host_pid = :pid AND host_start = :start
    AND session_id <> :sid;
 
--- 2) 이 세션에 붙인다
+-- 2) attach it to this session
 UPDATE sessions
    SET host_client = :c, host_pid = :pid, host_start = :start, heartbeat_at = :now
  WHERE session_id = :sid;
 ```
 
-**불변식: 하나의 `(host_client, host_pid, host_start)`를 보유한 행은 최대 1개다.**
-1번 문장이 그것을 보장하고, 3순위 조회가 그 위에 올라간다. 이 불변식이 깨지면 조회가
-복수 행을 만나 어느 세션인지 알 수 없게 되므로 **테스트로 고정한다.**
+**Invariant: at most one row holds any given `(host_client, host_pid,
+host_start)`.** Statement 1 guarantees it, and the tier-3 lookup rests on it.
+If the invariant breaks, the lookup meets multiple rows and cannot tell which
+session it is, so **it is pinned by tests.**
 
-### 3순위 조회
+### The tier-3 lookup
 
 ```sql
 SELECT session_id FROM sessions
@@ -195,72 +225,87 @@ SELECT session_id FROM sessions
    AND heartbeat_at >= :cutoff;
 ```
 
-0행이면 4순위(`unattributed`)로 떨어진다. 위 불변식 덕에 1행을 넘을 수 없다.
+Zero rows falls through to tier 4 (`unattributed`). Thanks to the invariant
+above it cannot exceed one row.
 
-## pid 재사용은 왜 오배달이 되지 않는가
+## Why pid reuse does not cause misdelivery
 
-선례는 별도의 생존 검사로 pid 재사용을 막는다. pager에는 그 검사가 **불필요하다** —
-`host_start`가 이미 그 일을 한다:
+The precedent blocks pid reuse with a separate liveness check. pager does
+**not need one** — `host_start` already does that job.
 
-호스트가 죽고 무관한 프로세스가 그 pid를 물려받았다고 하자. 그 프로세스에서 `pager send`를
-부르면 조회 키는 **호출자 자신이 탐지한** `(client, pid, start)`다.
+Suppose the host died and an unrelated process inherited its pid. Calling
+`pager send` from that process builds the lookup key from
+`(client, pid, start)` **as detected by the caller itself.**
 
-- 새 프로세스가 claude/codex 호스트가 아니면 → 조상 매칭 실패 → 탐지 실패 → 4순위
-- 새 프로세스가 claude/codex 호스트이면 → 시작 시각이 다르므로 `start`가 다름 → 0행 → 4순위
+- If the new process is not a claude/codex host → ancestor matching fails →
+  detection fails → tier 4
+- If it is a claude/codex host → its start time differs, so `start` differs →
+  zero rows → tier 4
 
-즉 **조회 키는 살아있는 호출자로부터만 만들어지므로**, 죽은 호스트의 낡은 행에는 도달할
-방법이 없다. `heartbeat_at` cutoff가 막는 것은 다른 것이다 — **호스트는 살아있는데 훅이
-한동안 실행되지 않은 경우**(훅 미등록·고장). 그때는 기록이 낡았다고 보고 거부한다.
+That is, **the lookup key is only ever built from a living caller**, so there is
+no way to reach a dead host's stale row. What the `heartbeat_at` cutoff guards
+is something else — **the host being alive while the hook has not run for a
+while** (hooks unregistered or broken). Then the record is considered stale and
+refused.
 
-## 재시작·복수 세션 격리
+## Restart and multi-session isolation
 
-| 상황 | 결과 |
+| Situation | Result |
 | --- | --- |
-| 호스트 재시작 | pid 또는 start가 달라져 **새 키**. 이전 행은 아무 호출자와도 매칭되지 않는 잔여물이 되고, stale 판정으로 별칭 claim 대상이 된다 |
-| 같은 호스트에서 `/clear`·resume | pid 동일, session_id 변경 → 키 이전으로 **새 세션이 승계**. 이전 세션 행은 host_* 가 NULL이 되어 3순위로 도달 불가 |
-| 같은 프로젝트에서 claude와 codex 동시 | `host_client`가 달라 키가 다르다 → 서로 간섭 없음 |
-| 같은 툴 인스턴스 2개 (다른 창) | pid가 달라 키가 다르다 → 서로 간섭 없음 |
-| 같은 세션이 여러 워크스페이스 | session_id가 축이므로 무관. 별칭 격리는 `root + tool`로 별도 보장 |
+| Host restart | pid or start differs, so it is a **new key**. The old row becomes residue matching no caller, and its staleness makes its alias claimable |
+| `/clear` or resume on the same host | Same pid, new session_id → key transfer, so **the new session inherits**. The old session's row has NULL host_\* and is unreachable via tier 3 |
+| claude and codex at once in the same project | `host_client` differs, so the keys differ → no interference |
+| Two instances of the same tool (different windows) | pids differ, so the keys differ → no interference |
+| One session across several workspaces | Irrelevant, since session_id is the axis. Alias isolation is guaranteed separately by `root + tool` |
 
 ## fail-closed
 
-탐지 실패·조회 0행은 **거부 방향**으로 떨어진다. `unattributed` 상태에서 `--human` 없는
-발신은 non-zero exit이고 큐에 삽입되지 않는다.
+Failed detection and a zero-row lookup fall **toward refusal**. In the
+`unattributed` state, a send without `--human` exits non-zero and is not
+inserted into the queue.
 
-이 선택의 대가는 명확하다: 호스트 프로세스 구조가 바뀌면 **CLI 발신 전체가 즉시 막힌다.**
-조용히 오배달되는 것보다 낫고, 즉시 감지된다는 점에서 이 방향이 맞다.
+The cost of this choice is clear: if the host process structure changes,
+**every CLI send blocks immediately.** That is better than silently
+misdelivering, and being detected immediately is why this is the right
+direction.
 
-단 **훅 경로는 예외다.** 훅은 전 경로 fail-open이어야 한다 (exit 0, stdout 무출력).
-훅이 실패하면 세션 자체가 막히기 때문이다. 훅은 1순위(`--session`)로 자기 세션을 알기
-때문에 이 계약의 3순위에 의존하지 않는다.
+**The hook path is the exception.** Hooks must be fail-open on every path
+(exit 0, no stdout), because a failing hook blocks the session itself. Hooks
+know their own session from tier 1 (`--session`), so they do not depend on
+tier 3 of this contract.
 
-## `--human`은 검증이 아니다
+## `--human` is not a check
 
-`--human`은 **호출자의 operator assertion**이며 보안상 검증된 human-origin이 아니다.
-자동 에이전트도 붙일 수 있고 그러면 hop 체인이 끊긴다. 따라서 이 플래그는 방어선이
-아니고, **최종 방어선은 breaker**다.
+`--human` is **an operator assertion by the caller**, not a securely verified
+human origin. An automated agent can attach it, and doing so breaks the hop
+chain. So the flag is not a line of defence — **the last line of defence is the
+breaker.**
 
-## 고정된 의존성
+## Pinned dependencies
 
-| 항목 | 버전 | 근거 |
+| Item | Version | Rationale |
 | --- | --- | --- |
-| SQLite 드라이버 | `modernc.org/sqlite v1.50.1` | 순수 Go → CGO 불필요, 크로스 컴파일 가능 |
-| MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | stdio 서버에 필요한 최소 표면만 쓴다 |
-| syscall 래퍼 | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` 파싱 |
+| SQLite driver | `modernc.org/sqlite v1.50.1` | Pure Go → no CGO, cross-compiles |
+| MCP SDK | `github.com/mark3labs/mcp-go v0.52.0` | Uses only the minimum surface a stdio server needs |
+| syscall wrapper | `golang.org/x/sys v0.44.0` | darwin `SysctlKinfoProc` / linux `/proc` parsing |
 
-세 패키지는 각각 `internal/store`, `internal/mcpsrv`, `internal/sessionref`·`internal/wake`가
-import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 syscall 래퍼는 darwin과 linux의
-경로가 갈리므로, 올릴 때 두 플랫폼 모두에서 `internal/sessionref` 테스트를 돌려야 한다.
+The three are imported by `internal/store`, `internal/mcpsrv`, and
+`internal/sessionref` / `internal/wake` respectively. The table above is the
+basis for deciding on a version bump — the syscall wrapper especially, since its
+darwin and linux paths diverge, so a bump needs the `internal/sessionref` tests
+run on both platforms.
 
-## 이 계약이 깨지는 조건
+## Conditions that break this contract
 
-- **호스트 실행 파일명이 바뀐다** — `comm`/`argv0`가 `claude`/`codex`로 시작하지 않게
-  되면 탐지가 실패한다. `PAGER_CLIENT`로 라벨은 덮을 수 있지만 조상 매칭 자체가 실패하면
-  덮을 수 없다.
-- **호스트가 CLI를 자손으로 실행하지 않는다** — 부모 체인이 끊기면 3순위가 무력해진다.
-  이때는 1순위(`--session`)나 2순위(`PAGER_SESSION`)로 명시해야 한다.
-- **16단보다 깊은 래퍼 체인** — 탐지 실패.
-- **darwin/linux 이외** — `procInfo`가 미지원이므로 3순위가 항상 실패한다. 1·2순위만
-  동작한다.
+- **The host executable is renamed** — if `comm`/`argv0` no longer starts with
+  `claude`/`codex`, detection fails. `PAGER_CLIENT` can override the label, but
+  it cannot override a failed ancestor match.
+- **The host stops running the CLI as a descendant** — a broken parent chain
+  disables tier 3. Then the session must be named explicitly via tier 1
+  (`--session`) or tier 2 (`PAGER_SESSION`).
+- **A wrapper chain deeper than 16 levels** — detection fails.
+- **Anything other than darwin/linux** — `procInfo` is unsupported, so tier 3
+  always fails. Only tiers 1 and 2 work.
 
-전부 fail-closed 방향이고, 첫 번째와 두 번째는 CLI 발신이 통째로 막히면서 즉시 드러난다.
+All of these fail closed, and the first two surface immediately by blocking CLI
+sends outright.
