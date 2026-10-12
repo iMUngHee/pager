@@ -170,13 +170,21 @@ func (c *claudeWaker) poke(ctx context.Context, sessionID, body string) error {
 		}
 	}
 
-	// Only a Unix socket can name its peer here. A Windows pipe is checked by
-	// record and token alone: its LOCAL\ namespace already keeps other users
-	// out, and a same-user squatter could read the key file anyway.
+	// A Unix socket names its peer; a Windows pipe names its server. Either
+	// way the kernel answers, so a process that squatted the path before the
+	// session did is caught here, before the body is written to it and the
+	// poke reported as delivered.
+	var (
+		pid   int
+		known bool
+	)
 	if unixConn, ok := conn.(*net.UnixConn); ok {
-		if pid, known := peerPID(unixConn); known && pid != sess.pid {
-			return fmt.Errorf("endpoint at %s is pid %d, want %d — refusing to write", sess.sock, pid, sess.pid)
-		}
+		pid, known = peerPID(unixConn)
+	} else {
+		pid, known = pipeServerPID(conn)
+	}
+	if known && pid != sess.pid {
+		return fmt.Errorf("endpoint at %s is pid %d, want %d — refusing to write", sess.sock, pid, sess.pid)
 	}
 
 	token, err := c.peerToken(sess)
