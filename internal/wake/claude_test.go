@@ -76,6 +76,10 @@ func (r *registry) key(t *testing.T, pid int, sock, token string) {
 	if err != nil {
 		t.Fatalf("abs: %v", err)
 	}
+	// Claude hashes canonical, case-insensitive Windows pipe addresses.
+	if strings.HasPrefix(strings.ToLower(abs), `\\.\pipe\`) {
+		abs = strings.ToLower(abs)
+	}
 	sum := sha256.Sum256([]byte(abs))
 	body, err := json.Marshal(map[string]string{"peerToken": token})
 	if err != nil {
