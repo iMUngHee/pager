@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +100,73 @@ func TestWindowsNamedPipeMissingKeyIsRefused(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("accept did not finish")
+	}
+}
+
+func TestWindowsNamedPipeServerPIDIsThisProcess(t *testing.T) {
+	path := fmt.Sprintf(`\\.\pipe\LOCAL\pager-server-pid-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	ln, err := winio.ListenPipe(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if conn, err := ln.Accept(); err == nil {
+			conn.Close()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), Deadline)
+	defer cancel()
+	conn, err := dialClaude(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	pid, known := pipeServerPID(conn)
+	if !known || pid != os.Getpid() {
+		t.Fatalf("got pid %d known %v, want %d", pid, known, os.Getpid())
+	}
+}
+
+func TestWindowsNamedPipeWrongServerIsRefused(t *testing.T) {
+	path := fmt.Sprintf(`\\.\pipe\LOCAL\pager-wrong-pid-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	ln, err := winio.ListenPipe(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	received := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(Deadline))
+		got, _ := io.ReadAll(conn)
+		received <- got
+	}()
+	// The record names another live process, so this process serving the
+	// pipe is exactly the squatter the check exists for. The key is present
+	// so only the pid check can explain a refusal.
+	other := os.Getppid()
+	r := newRegistry(t)
+	r.record(t, other, "pipe-session", path, claudePeerProtocol)
+	r.key(t, other, path, "test-token")
+	ctx, cancel := context.WithTimeout(context.Background(), Deadline)
+	defer cancel()
+	err = r.waker().poke(ctx, "pipe-session", "must not be sent")
+	want := fmt.Sprintf("is pid %d, want %d — refusing to write", os.Getpid(), other)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("got %v, want an error containing %q", err, want)
+	}
+	select {
+	case got := <-received:
+		if len(got) != 0 {
+			t.Fatalf("server received %q, want nothing", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("server did not see the connection close")
 	}
 }
 
