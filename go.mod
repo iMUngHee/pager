@@ -3,6 +3,7 @@ module github.com/iMUngHee/pager
 go 1.26.5
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/mark3labs/mcp-go v0.52.0
 	golang.org/x/sys v0.44.0
 	modernc.org/sqlite v1.50.1

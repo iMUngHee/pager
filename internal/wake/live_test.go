@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -215,8 +216,12 @@ func TestLiveClaudeWake(t *testing.T) {
 	if got.Outcome != Woken {
 		t.Fatalf("Wake() = %q via %q (%v), want %q", got.Outcome, got.Via, got.Err, Woken)
 	}
-	if got.Via != "uds" {
-		t.Errorf("Via = %q, want \"uds\"", got.Via)
+	wantVia := "uds"
+	if runtime.GOOS == "windows" {
+		wantVia = "named-pipe"
+	}
+	if got.Via != wantVia {
+		t.Errorf("Via = %q, want %q", got.Via, wantVia)
 	}
 
 	deadline := time.Now().Add(45 * time.Second)

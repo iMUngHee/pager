@@ -61,7 +61,7 @@ const (
 // humans reading a failure, not for callers to switch on.
 type Result struct {
 	Outcome Outcome
-	Via     string // "uds", "codex-queue", or "" when nothing was tried
+	Via     string // "uds", "named-pipe", "codex-queue", or "" when nothing was tried
 	Err     error
 }
 

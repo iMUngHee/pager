@@ -14,9 +14,10 @@ import (
 	"time"
 )
 
-// Claude Code publishes a record per live session and listens on a unix socket
-// named in it. Everything this adapter needs is in that directory: the socket
-// path, the pid that owns it, and the token a sender must present.
+// Claude Code publishes a record per live session and listens on a Unix socket
+// (a named pipe on Windows) named in it. Everything this adapter needs is in
+// that directory: the socket path, the pid that owns it, and the token a
+// sender must present.
 //
 // None of it is a documented contract. peerProtocol is the only version signal
 // the records carry, so it is the one thing checked before speaking — an
@@ -79,7 +80,12 @@ func newClaudeWaker() *claudeWaker {
 	return &claudeWaker{dir: filepath.Join(home, ".claude", "sessions")}
 }
 
-func (c *claudeWaker) name() string { return "uds" }
+func (c *claudeWaker) name() string {
+	if c.found != nil && strings.HasPrefix(strings.ToLower(c.found.sock), `\\.\pipe\`) {
+		return "named-pipe"
+	}
+	return "uds"
+}
 
 // reach answers whether this session has a messaging inbox we know how to talk
 // to. It reads; it never writes or connects.
@@ -152,25 +158,25 @@ func (c *claudeWaker) poke(ctx context.Context, sessionID, body string) error {
 		}
 	}
 
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "unix", sess.sock)
+	conn, err := dialClaude(ctx, sess.sock)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return fmt.Errorf("unexpected connection type %T for %s", conn, sess.sock)
-	}
 	if deadline, has := ctx.Deadline(); has {
-		if err := unixConn.SetDeadline(deadline); err != nil {
+		if err := conn.SetDeadline(deadline); err != nil {
 			return err
 		}
 	}
 
-	if pid, known := peerPID(unixConn); known && pid != sess.pid {
-		return fmt.Errorf("endpoint at %s is pid %d, want %d — refusing to write", sess.sock, pid, sess.pid)
+	// Only a Unix socket can name its peer here. A Windows pipe is checked by
+	// record and token alone: its LOCAL\ namespace already keeps other users
+	// out, and a same-user squatter could read the key file anyway.
+	if unixConn, ok := conn.(*net.UnixConn); ok {
+		if pid, known := peerPID(unixConn); known && pid != sess.pid {
+			return fmt.Errorf("endpoint at %s is pid %d, want %d — refusing to write", sess.sock, pid, sess.pid)
+		}
 	}
 
 	token, err := c.peerToken(sess)
@@ -182,7 +188,7 @@ func (c *claudeWaker) poke(ctx context.Context, sessionID, body string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := unixConn.Write(frame); err != nil {
+	if _, err := conn.Write(frame); err != nil {
 		return err
 	}
 	if runtime.GOOS == "darwin" {
@@ -202,6 +208,16 @@ func (c *claudeWaker) peerToken(sess *claudeSession) (string, error) {
 	abs, err := filepath.Abs(sess.sock)
 	if err != nil {
 		return "", err
+	}
+	// Claude canonicalizes Windows pipe addresses with ASCII case folding
+	// before hashing; filesystem socket paths retain their original spelling.
+	if strings.HasPrefix(strings.ToLower(abs), `\\.\pipe\`) {
+		abs = strings.Map(func(r rune) rune {
+			if r >= 'A' && r <= 'Z' {
+				return r + ('a' - 'A')
+			}
+			return r
+		}, abs)
 	}
 	sum := sha256.Sum256([]byte(abs))
 	path := filepath.Join(c.dir, fmt.Sprintf("%d.%x.key", sess.pid, sum))
