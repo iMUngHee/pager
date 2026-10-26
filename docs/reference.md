@@ -166,6 +166,17 @@ pager alias review-box             # choose a name (in place of the automatic on
 pager claim review-box             # take over an offline inbox
 pager prune --dry-run              # what is past retention
 pager export > backup.jsonl        # the whole store as JSONL
+
+pager send kipa@vm "…"             # a session in another store (see Relaying between stores)
+pager relay id                     # this store's id, for a peer to enrol
+pager peer add vm --store <id>     # enrol another store under a name
+pager peer ls                      # peers, and how much mail is waiting to leave for each
+pager peer rm vm [--force]         # forget a peer (--force cancels its pending mail)
+pager peer rebind vm --store <id>  # point a peer at another store id, or re-pair it
+pager relay new-id [--force]       # give this store a new id (after a restore from backup)
+pager relay out --peer vm          # transport side: records waiting to leave
+pager relay in --peer laptop       # transport side: import records, print results
+pager relay ack --peer vm          # transport side: apply results
 ```
 
 **"Picked up" means two things at once.** Either a hook injected the message
@@ -300,6 +311,177 @@ If today's session inherited yesterday's alias in the same repository, that is
 a misdelivery. Handover is **explicit**, via `pager claim`. When there is an
 inbox available to take over, the hook mentions it once per session.
 
+## Relaying between stores
+
+Each machine keeps its own store, and everything above stays local to it. To
+reach a session on another machine, the two stores are paired as **peers** and
+something you run — a **transport** — carries mail between them. pager never
+opens a network connection; it only reads and writes lines.
+
+### Addresses
+
+`name@peer` addresses a session in the store registered as `peer`. A target
+containing `@` resolves in a fixed order: an existing local alias spelled
+exactly that way (names created before this rule); otherwise `name@peer` for a
+registered peer; otherwise `unknown peer`. It never falls through to the
+substring tiers, because `kipa@vm` quietly matching a local `kipa@vm2` would be
+mail delivered to the wrong machine. New aliases may not contain `@`. A target
+without `@` resolves exactly as before.
+
+A remote send is checked and written like any other — hop and rate limits
+included — and is then queued: `sent #12 to kipa@vm (hop 0, human)` / `queued
+for peer vm; it leaves when the relay next runs`. It is never poked; the
+receiving store wakes its own session when it imports the message. A remote
+body is limited to 64 KiB.
+
+### Pairing two stores
+
+```bash
+laptop$ pager relay id                          # → a1b2…
+vm$     pager relay id                          # → c3d4…
+laptop$ pager peer add vm --store c3d4…
+vm$     pager peer add laptop --store a1b2…
+```
+
+Enrolling the other store's id explicitly is what makes a transport that lands
+on the wrong database fail instead of delivering there. Peer names are 1–32
+characters of `a-z`, `0-9` and `-`, starting with a letter or digit. A name an
+existing alias already ends with as `@name` is refused, so it can never be
+shadowed.
+
+### The transport contract
+
+Three commands, connected by pipes. One round in each direction:
+
+```bash
+# laptop → vm
+pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
+# vm → laptop
+ssh vm pager relay out --peer laptop | pager relay in --peer vm | ssh vm pager relay ack --peer laptop
+```
+
+ssh is only an example; anything that moves lines will do. What pager
+guarantees holds for a transport that may **lose, repeat or cut** lines, as
+long as it does not reorder them:
+
+- `relay out` is a pure read. Until a final result is acknowledged it emits the
+  same pending records in the same order every run (`--limit`, 1–1000, default
+  100).
+- `relay in` decides and commits each record on its own and prints one result
+  line per record. A repeated record is answered `duplicate`; a missing one
+  stops the run (`deferred`, `gap`) until it arrives.
+- `relay ack` validates the whole batch before changing anything, then closes
+  each message that got a final result. Applying the same results twice changes
+  nothing.
+
+| Status | Final | Meaning |
+| --- | --- | --- |
+| `imported` | yes | Written to the recipient's inbox; the recipient is poked |
+| `duplicate` | yes | Already here — a resend, or one already imported |
+| `rejected` | yes | Cannot be delivered (no such alias, out-of-range hop, …); the sender gets a bounce |
+| `deferred` | no | Not now: a gap, or the per-peer cap (`retry_after_ms` says when) — the run stops |
+| `refused` | no | The stream is wrong: unknown peer, wrong store, unsupported version, malformed line — the run stops |
+
+| Exit | Meaning | Transport should |
+| --- | --- | --- |
+| 0 | Input consumed, or stopped on `deferred` | Carry on; retry deferred mail later |
+| 1 | Database or I/O failure | Retry later |
+| 2 | Protocol or configuration problem (`refused`, usage) | Stop and tell a person |
+| 3 | Input ended inside a line (cut stream) | Retry the round; the cut line had no effect |
+
+A transport should also:
+
+- run the **same pager binary the hooks use** — under ssh, `PATH` may find an
+  older one, which refuses the newer database or migrates it underneath the
+  hooks;
+- read the commands' stdout while writing their stdin, so a pipe buffer — small
+  on Windows — cannot deadlock;
+- not count it as a failure when `relay out` exits with a write error because
+  `relay in` stopped reading early.
+
+### Records
+
+One JSON object per line, LF-terminated. pager writes pure ASCII — every
+non-ASCII character as `\uXXXX` — so no console or pipe re-encoding can corrupt
+it, and it reads UTF-8 with an optional leading byte-order mark and CRLF line
+endings. A line may be at most 1 MiB; a line without its LF is incomplete and
+has no effect.
+
+```json
+{"v":1,"kind":"msg","link":{"store":"<sender store>","id":"<link id>","seq":17},
+ "origin":{"store":"<store>","id":4211},"dst_store":"<receiver store>",
+ "to":"kipa","from":"sape","label":"sape","tool":"claude","hop":1,
+ "sent_at":"2026-10-26T06:12:01.123Z","body":"…"}
+{"v":1,"kind":"result","store":"<receiver store>","max_v":1,
+ "link":{"store":"…","id":"…","seq":17},"origin_id":4211,
+ "status":"imported","reason":"","retry_after_ms":0}
+```
+
+`link` places the record in a gap-free sequence; `origin` is the message's
+identity in the store that wrote it. `from` is the sender's reply name, or
+`null`; `label`, `tool` and `sent_at` are display only. `v` is the protocol
+version. A field that changes what a receiver must do bumps it even when it is
+only added (a receiver that ignored it would act wrongly); purely descriptive
+fields may be added without a bump, and receivers ignore fields they do not
+know. A sender writes the lowest version that can express a record, so
+upgrading one side first does not stall the other.
+
+### What crosses, and what is capped
+
+- **The causal hop crosses with the message.** A reply to relayed mail sits one
+  deeper than it, so a chain of agent replies is capped at the same `MaxHop`
+  across stores as within one.
+- **Imported mail is not this store's sending.** It does not use the local
+  human budget, and is bounded instead by a per-peer cap of 60 imports an hour
+  (an estimate, like the other limits); past it, records are deferred, not lost.
+- **The recipient sees where it came from**, on a line pager writes itself —
+  no label can produce or imitate it:
+
+  ```
+  [#12] from sape
+    relayed from peer laptop — reply to sape@laptop
+  > the parser work is yours
+  ```
+
+  Without a reply name it says `no reply address; answer in your own output`.
+- **A rejection comes back as a bounce** to a name the sending session still
+  holds — `your message #12 to ghost@vm was not delivered: no such alias ghost;
+  live names here: kipa`. A send with no session, or from a session that holds
+  no name, gets no bounce; the outcome stays on the message (`pager peer ls`,
+  export). A bounce follows its alias like any local mail.
+
+### Peer lifecycle
+
+- `pager peer rm vm` is refused while mail to `vm` has no final result.
+  `--force` cancels that mail and tells each sender it **may still arrive** — a
+  transport may already have carried it. Cancelled mail is never sent again.
+- `pager peer rebind vm --store <id>` re-pairs a peer — after the other store
+  was recreated, say. Pending mail moves to a new link, renumbered from 1, and a
+  result still in flight for the old link changes nothing. What was already
+  carried to the old store cannot be recalled: if that store is still alive it
+  may receive those messages too.
+- `pager relay new-id` gives this store a new id, which **a store restored from
+  a backup needs**: the restore rolls sequence numbers and message ids back
+  while keeping the id, so a peer would take genuinely new mail for mail it has
+  already seen. It is refused while mail is pending, because a message re-sent
+  under a new id would look new to a peer that already imported it; `--force`
+  cancels that mail first, telling each sender. Each peer must then
+  `pager peer rebind <name> --store <new id>`.
+
+### Limits
+
+- A record resent after the receiving side has already pruned it — more than
+  30 days after import, which needs its result to have been lost and no later
+  round to have got through — is answered `rejected: previously rejected`, and
+  may bounce a message that was in fact delivered.
+- Relaying is one hop: a store does not forward mail it imported to a third
+  store (`via` is reserved for that; a version 1 receiver rejects it).
+- The roster does not list sessions in other stores; their names are learned
+  from mail they send. When peers are registered, `pager who` and `msg_roster`
+  end with a line naming them and when this store last saw each link work
+  (`no relay seen` if never) — a local observation, not a claim that the other
+  store is up.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -334,6 +516,10 @@ Every default is an **estimate**, chosen without production metrics.
 
 Retention is 30 days, after which messages are deleted. One hook run performs
 this once every 24 hours; `pager prune` runs it directly.
+
+Mail addressed to another store is done once that store gives it a final
+result. Until then it is kept however old it is: deleting it would lose it with
+nobody told.
 
 **Nothing is deleted before it is on disk.** prune appends each row it is about
 to delete to `~/.pager/archive.jsonl` and `fsync`s **before** deleting. If the
@@ -427,7 +613,12 @@ which cannot be removed, only reduced:
 - the body is wrapped as a quote block and marked data, not instructions
 - length is capped
 
-The store is local to one user account with no network exposure.
+pager never opens a network connection, and a store is local to one user
+account. Anything that can run `pager relay in` as that user can add mail to
+the store — the same authority `pager send --human` already has. A relay
+transport extends the boundary to wherever it runs, so run it as the same user
+and over an authenticated channel. Mail from another store is marked as such
+on a line pager writes, and its sender's text never leaves the quoted body.
 
 ## When it breaks
 

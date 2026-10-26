@@ -172,7 +172,12 @@ func (s *Server) handleRoster(ctx context.Context, _ mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt, true)), nil
+	peers, err := deliver.PeersSeen(ctx, s.st)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt, true) +
+		deliver.FormatPeerFooter(peers, s.st.Now())), nil
 }
 
 func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

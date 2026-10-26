@@ -118,6 +118,7 @@ states the exact terms.
 | --- | --- |
 | `pager who` | Who can I send to, and is anyone actually behind that name? |
 | `pager send <name> "…"` | Send. |
+| `pager send <name>@<peer> "…"` | Send to a session in another store, carried by a relay. |
 | `pager ls` | What came to me. |
 | `pager ls --waiting` | What nobody has picked up yet. |
 | `pager inbox` | Which inboxes have mail waiting, across all sessions. |
@@ -139,6 +140,23 @@ Three tools: `msg_send` to send, `msg_list` to read your own mail, `msg_roster`
 to see who you could send to. An agent learns its own name from the hook, but
 learns other names only from mail it receives — hence the roster.
 
+## Sessions on another machine (optional)
+
+Each machine keeps its own store. To reach a session on another one, pair the
+two stores and let a transport you run carry mail between them — pager itself
+never opens a connection:
+
+```bash
+laptop$ pager peer add vm --store "$(ssh vm pager relay id)"
+vm$     pager peer add laptop --store <id from `pager relay id` on the laptop>
+laptop$ pager send kipa@vm "the parser work is yours"
+laptop$ pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
+```
+
+The causal hop crosses with the message, so the loop guard holds across
+machines too. The full contract — statuses, exit codes, record format, peer
+lifecycle — is in [reference.md](docs/reference.md#relaying-between-stores).
+
 ## One safety note
 
 A message body is text another agent wrote, landing in your context. That is a
@@ -146,7 +164,9 @@ prompt-injection path, and it cannot be designed away — only reduced. pager
 always shows the sender, wraps the body as data rather than instructions, and
 caps its length.
 
-The store is local to your user account and never touches the network.
+The store is local to your user account, and pager never opens a network
+connection. Mail relayed from another store is marked as such on a line pager
+writes itself.
 
 ## Documentation
 

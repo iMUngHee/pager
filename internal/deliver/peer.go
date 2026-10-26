@@ -380,3 +380,60 @@ func moveToLink(ctx context.Context, c *sql.Conn, peer, link string) (int64, err
 	}
 	return int64(len(ids)), nil
 }
+
+// PeerSeen is a peer as the roster footer shows it.
+type PeerSeen struct {
+	Name string
+	// LastRelay is when this store last observed the link working — the later
+	// of its last applied result and its last import — or 0 when it never has
+	// (or the evidence has aged out with the mail).
+	LastRelay int64
+}
+
+// PeersSeen lists the registered peers with what this store has observed of
+// each. It is derived from the rows alone, so nothing — least of all relay
+// out, which must stay a pure read — writes state for it. A cancellation is a
+// local act and is not an observation of the peer, so it does not count.
+func PeersSeen(ctx context.Context, st *store.Store) ([]PeerSeen, error) {
+	rows, err := st.DB().QueryContext(ctx, `
+		SELECT p.name,
+		       max(COALESCE((SELECT max(m.relayed_at) FROM messages m
+		                      WHERE m.dst_peer = p.name
+		                        AND (m.relay_result IN ('imported', 'duplicate') OR m.relay_result LIKE 'rejected%')), 0),
+		           COALESCE((SELECT max(m.created_at) FROM messages m WHERE m.src_peer = p.name), 0))
+		  FROM peers p
+		 ORDER BY p.name`)
+	if err != nil {
+		return nil, fmt.Errorf("read peer activity: %w", err)
+	}
+	defer rows.Close()
+	var out []PeerSeen
+	for rows.Next() {
+		var p PeerSeen
+		if err := rows.Scan(&p.Name, &p.LastRelay); err != nil {
+			return nil, fmt.Errorf("read peer activity: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FormatPeerFooter is the line `pager who` and msg_roster add when peers are
+// registered, or "" when there are none — so a store that never relays shows
+// exactly what it always did. The roster does not list sessions in other
+// stores; this says where they are and how their names are learned.
+func FormatPeerFooter(peers []PeerSeen, now int64) string {
+	if len(peers) == 0 {
+		return ""
+	}
+	parts := make([]string, len(peers))
+	for i, p := range peers {
+		if p.LastRelay == 0 {
+			parts[i] = p.Name + " (no relay seen)"
+		} else {
+			parts[i] = p.Name + " (last relay " + ago(now, p.LastRelay) + ", observed locally)"
+		}
+	}
+	return "\npeers: " + strings.Join(parts, ", ") +
+		" — address their sessions as name@peer; remote names are learned from mail they send you\n"
+}

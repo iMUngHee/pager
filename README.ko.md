@@ -112,6 +112,7 @@ pager whoami                       # 내 세션과 내 이름
 | --- | --- |
 | `pager who` | 누구에게 보낼 수 있고, 그 이름 뒤에 실제로 누가 있나 |
 | `pager send <이름> "…"` | 보내기 |
+| `pager send <이름>@<peer> "…"` | 다른 저장소의 세션에게 보내기 (relay가 실어 나른다) |
 | `pager ls` | 내 앞으로 온 것 |
 | `pager ls --waiting` | 아직 아무도 챙기지 않은 것 |
 | `pager inbox` | 세션 무관, 메일이 밀려 있는 수신함 전부 |
@@ -133,13 +134,31 @@ codex  mcp add pager       -- pager mcp
 봅니다. 에이전트는 자기 이름은 훅에서 알지만 남의 이름은 받은 메일로만 알게 되므로 로스터가
 필요합니다.
 
+## 다른 머신의 세션 (선택)
+
+머신마다 자기 저장소를 따로 씁니다. 다른 머신의 세션에 닿으려면 두 저장소를 짝지어 두고, 직접
+돌리는 전송 수단(transport)이 그 사이로 메일을 옮기게 합니다 — pager 자신은 연결을 열지
+않습니다:
+
+```bash
+laptop$ pager peer add vm --store "$(ssh vm pager relay id)"
+vm$     pager peer add laptop --store <laptop에서 `pager relay id`로 본 값>
+laptop$ pager send kipa@vm "파서 작업 넘긴다"
+laptop$ pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
+```
+
+인과 hop이 메시지와 함께 넘어가므로, 루프 방지는 머신을 건너도 그대로 유지됩니다. 상태 값, exit
+code, 레코드 형식, peer 수명 주기 같은 전체 계약은
+[reference.ko.md](docs/reference.ko.md#저장소-사이의-relay)에 있습니다.
+
 ## 안전에 관해 하나
 
 메시지 본문은 다른 에이전트가 쓴 텍스트가 내 컨텍스트에 들어오는 것입니다. 프롬프트 주입
 경로이고, 없앨 수는 없고 줄일 수만 있습니다. pager는 항상 발신자를 표시하고, 본문을 지시가
 아니라 데이터로 감싸고, 길이를 제한합니다.
 
-저장소는 내 사용자 계정 전용이고 네트워크에 나가지 않습니다.
+저장소는 내 사용자 계정 전용이고, pager는 네트워크 연결을 열지 않습니다. 다른 저장소에서
+relay된 메일은 pager가 직접 쓰는 줄로 그 사실이 표시됩니다.
 
 ## 문서
 
