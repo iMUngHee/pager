@@ -57,7 +57,8 @@ var (
 // Limits on what a remote send puts into its relay record. Every field the
 // record carries is bounded at send time, so no record can outgrow the relay
 // reader's line bound and block its link: the body here, the label and the
-// recipient's name below, the sender's reply name when the record is written.
+// recipient's name below, the sender's reply name and host name when the
+// record is written.
 const (
 	MaxRelayLabel = 1 << 10 // bytes; delivery shows only the first 64 runes anyway
 	MaxRelayName  = 128     // bytes, for the name before '@'
