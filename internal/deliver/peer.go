@@ -49,9 +49,12 @@ func NormalizePeerName(name string) (string, error) {
 	if n == "" || len(n) > maxPeerName {
 		return "", fmt.Errorf("peer name %q must be 1-%d characters", name, maxPeerName)
 	}
-	for _, r := range n {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-			return "", fmt.Errorf("peer name %q may only use a-z, 0-9 and '-'", name)
+	for i, r := range n {
+		alnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if !alnum && (r != '-' || i == 0) {
+			// A leading '-' would read as a flag wherever a transport puts
+			// the name on a command line.
+			return "", fmt.Errorf("peer name %q may only use a-z, 0-9 and '-', and must start with a letter or digit", name)
 		}
 	}
 	return n, nil
@@ -96,13 +99,6 @@ func AddPeer(ctx context.Context, st *store.Store, name, storeID string) (Peer, 
 	if !validStoreID(storeID) {
 		return Peer{}, fmt.Errorf("store id %q is not 32 hex digits — copy it from `pager relay id` on that store", storeID)
 	}
-	own, err := st.ID(ctx)
-	if err != nil {
-		return Peer{}, err
-	}
-	if storeID == own {
-		return Peer{}, errors.New("that is this store's own id; a peer is another store")
-	}
 	link, err := newLinkID()
 	if err != nil {
 		return Peer{}, err
@@ -110,6 +106,14 @@ func AddPeer(ctx context.Context, st *store.Store, name, storeID string) (Peer, 
 
 	p := Peer{Name: name, StoreID: storeID, LinkID: link, AddedAt: st.Now()}
 	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		own, err := store.IDOn(ctx, c)
+		if err != nil {
+			return err
+		}
+		if storeID == own {
+			return errors.New("that is this store's own id; a peer is another store")
+		}
+
 		var exists int
 		if err := c.QueryRowContext(ctx,
 			"SELECT count(*) FROM peers WHERE name = ?", name).Scan(&exists); err != nil {
