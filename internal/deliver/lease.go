@@ -78,6 +78,10 @@ type Pending struct {
 	Body      string
 	Hop       int
 	CreatedAt int64
+	// SrcPeer and SrcFrom are set for mail imported from another store: the
+	// peer it came through and the sender's reply name there, if any.
+	SrcPeer string
+	SrcFrom string
 	// OriginalRunes is the body's length before truncation, or 0 when it was
 	// delivered whole. The recipient is told, so a cut never reads as the
 	// whole message.
@@ -141,7 +145,8 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	windowStart := now - lim.InjectTTL.Milliseconds()
 
 	rows, err := st.DB().QueryContext(ctx, `
-		SELECT m.id, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at
+		SELECT m.id, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at,
+		       COALESCE(m.src_peer, ''), COALESCE(m.src_from, '')
 		  FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?
 		   AND m.delivered_at IS NULL
@@ -156,7 +161,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	var out []Pending
 	for rows.Next() {
 		var p Pending
-		if err := rows.Scan(&p.ID, &p.Sender, &p.Body, &p.Hop, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Sender, &p.Body, &p.Hop, &p.CreatedAt, &p.SrcPeer, &p.SrcFrom); err != nil {
 			return nil, 0, fmt.Errorf("list candidates: %w", err)
 		}
 		out = append(out, p)

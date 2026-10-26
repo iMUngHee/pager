@@ -124,6 +124,8 @@ func TestRecordEncodingIsGolden(t *testing.T) {
 	want := `{"v":1,"id":7,"created_at":"2026-07-19T04:12:33.481Z","alias":"gupa",` +
 		`"sender_session":null,"sender_label":"human","origin":"human","cause_id":null,` +
 		`"hop":0,"delivered_at":null,"delivery_seq":null,"listed_at":null,` +
+		`"src_peer":null,"src_store":null,"src_id":null,"src_from":null,` +
+		`"dst_peer":null,"dst_link":null,"dst_seq":null,"relayed_at":null,"relay_result":null,` +
 		`"body":"a <b> & \"c\"\n두 번째 줄"}` + "\n"
 
 	var first, second bytes.Buffer
@@ -174,7 +176,9 @@ func TestRecordContract(t *testing.T) {
 
 	wantKeys := []string{
 		"v", "id", "created_at", "alias", "sender_session", "sender_label",
-		"origin", "cause_id", "hop", "delivered_at", "delivery_seq", "listed_at", "body",
+		"origin", "cause_id", "hop", "delivered_at", "delivery_seq", "listed_at",
+		"src_peer", "src_store", "src_id", "src_from", "dst_peer", "dst_link", "dst_seq", "relayed_at", "relay_result",
+		"body",
 	}
 	for id, m := range byID {
 		// ① the key set is exact — neither a missing field nor a stray one.
