@@ -17,7 +17,7 @@ import (
 // peerCmd manages the stores this one relays with.
 func peerCmd(args []string) error {
 	if len(args) == 0 {
-		return usageError("usage: pager peer add <name> --store <id> | ls | rm <name> [--force]")
+		return usageError("usage: pager peer add <name> --store <id> | ls | rm <name> [--force] | rebind <name> --store <id>")
 	}
 	ctx := context.Background()
 	switch args[0] {
@@ -66,6 +66,27 @@ func peerCmd(args []string) error {
 		}
 		return tw.Flush()
 
+	case "rebind":
+		fs := flag.NewFlagSet("peer rebind", flag.ContinueOnError)
+		storeID := fs.String("store", "", "the store id to pair with now, from `pager relay id` there")
+		if err := fs.Parse(permute(fs, args[1:])); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 || *storeID == "" {
+			return usageError("usage: pager peer rebind <name> --store <id>")
+		}
+		st, err := openStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		p, err := deliver.RebindPeer(ctx, st, fs.Arg(0), *storeID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("rebound peer %s to store %s on a new link; %d pending message(s) renumbered\n", p.Name, p.StoreID, p.Pending)
+		return nil
+
 	case "rm":
 		fs := flag.NewFlagSet("peer rm", flag.ContinueOnError)
 		force := fs.Bool("force", false, "cancel mail still waiting for this peer, telling each sender")
@@ -96,7 +117,7 @@ func peerCmd(args []string) error {
 // itself never opens a connection.
 func relayCmd(args []string) error {
 	if len(args) == 0 {
-		return usageError("usage: pager relay id | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>")
+		return usageError("usage: pager relay id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>")
 	}
 
 	// A transport that stops reading closes the pipe under us. Ignoring
@@ -112,13 +133,14 @@ func relayCmd(args []string) error {
 	fs := flag.NewFlagSet("relay "+sub, flag.ContinueOnError)
 	peer := fs.String("peer", "", "the peer this stream goes to or comes from")
 	limit := fs.Int("limit", relay.DefaultLimit, fmt.Sprintf("most records to emit (1-%d)", relay.MaxLimit))
+	force := fs.Bool("force", false, "new-id: cancel mail still waiting for peers, telling each sender")
 	if err := fs.Parse(permute(fs, args[1:])); err != nil {
 		return usageError(err.Error())
 	}
 	if fs.NArg() != 0 {
 		return usageError(fmt.Sprintf("relay %s takes no arguments (got %q)", sub, fs.Arg(0)))
 	}
-	if sub != "id" && *peer == "" {
+	if sub != "id" && sub != "new-id" && *peer == "" {
 		return usageError(fmt.Sprintf("relay %s needs --peer", sub))
 	}
 
@@ -135,6 +157,19 @@ func relayCmd(args []string) error {
 			return err
 		}
 		fmt.Println(id)
+		return nil
+	case "new-id":
+		var id string
+		if *force {
+			id, err = relay.ForceRotateStoreID(ctx, st, os.Stderr)
+		} else {
+			id, err = deliver.RotateStoreID(ctx, st)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Println(id)
+		fmt.Fprintln(os.Stderr, "every peer must now run: pager peer rebind <name-of-this-store> --store "+id)
 		return nil
 	case "out":
 		return relay.Out(ctx, st, *peer, *limit, os.Stdout)

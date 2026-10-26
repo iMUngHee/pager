@@ -17,7 +17,9 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -824,4 +826,77 @@ func ForceRemovePeer(ctx context.Context, st *store.Store, peer string, diag io.
 	fmt.Fprintf(diag, "removed peer %s; cancelled %d, bounced %d\n", name, cancelled, len(bounced))
 	pokeAll(ctx, bounced, diag)
 	return nil
+}
+
+// ForceRotateStoreID gives this store a new id after cancelling every message
+// to every peer that has no final result, telling each sender it may still
+// arrive. See deliver.RotateStoreID for why pending mail cannot simply move to
+// the new id.
+func ForceRotateStoreID(ctx context.Context, st *store.Store, diag io.Writer) (string, error) {
+	id, err := newStoreID()
+	if err != nil {
+		return "", err
+	}
+	var bounced []recipient
+	var cancelled int
+	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		bounced, cancelled = bounced[:0], 0
+		rows, err := c.QueryContext(ctx,
+			"SELECT id, dst_peer FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL ORDER BY id")
+		if err != nil {
+			return fmt.Errorf("read pending mail: %w", err)
+		}
+		type row struct {
+			id   int64
+			peer string
+		}
+		var pending []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.peer); err != nil {
+				rows.Close()
+				return err
+			}
+			pending = append(pending, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		now := st.Now()
+		for _, r := range pending {
+			if _, err := c.ExecContext(ctx,
+				"UPDATE messages SET relayed_at = ?, relay_result = ? WHERE id = ? AND relayed_at IS NULL",
+				now, "cancelled: store id replaced (may still arrive)", r.id); err != nil {
+				return fmt.Errorf("cancel message %d: %w", r.id, err)
+			}
+			cancelled++
+			to, err := bounce(ctx, c, now, r.id,
+				"was cancelled: this store took a new id before peer "+r.peer+" confirmed delivery, so it may still arrive")
+			if err != nil {
+				return err
+			}
+			if to.alias != "" {
+				bounced = append(bounced, to)
+			}
+		}
+		return deliver.RelinkAll(ctx, c, id)
+	})
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(diag, "new store id %s; cancelled %d, bounced %d\n", id, cancelled, len(bounced))
+	pokeAll(ctx, bounced, diag)
+	return id, nil
+}
+
+// newStoreID mints a store id: 32 lowercase hex digits from crypto/rand, the
+// shape the relay migration generates.
+func newStoreID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("mint store id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }

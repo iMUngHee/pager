@@ -49,8 +49,8 @@ var commands = []command{
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", serveMCP},
-	{"peer", "add <name> --store <id> | ls | rm <name> [--force]", "Manage the stores this one relays with", peerCmd},
-	{"relay", "id | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>", "Move messages between stores over any transport", relayCmd},
+	{"peer", "add <name> --store <id> | ls | rm <name> [--force] | rebind <name> --store <id>", "Manage the stores this one relays with", peerCmd},
+	{"relay", "id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>", "Move messages between stores over any transport", relayCmd},
 }
 
 // openStore opens the standard database with the real clock.
