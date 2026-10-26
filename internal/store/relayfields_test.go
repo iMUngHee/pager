@@ -136,3 +136,30 @@ func TestExportCarriesRelayFields(t *testing.T) {
 		t.Errorf("relayed_at = %v, want %s", out["relayed_at"], archiveStamp(now))
 	}
 }
+
+// TestPruneNeverFinishesOutboundByDelivery: outbound mail is finished only by
+// a final relay result. A row addressed to a peer that somehow carries
+// delivered_at is still kept until relayed_at says it has left.
+func TestPruneNeverFinishesOutboundByDelivery(t *testing.T) {
+	s, fake := newStore(t)
+	t.Setenv("PAGER_ARCHIVE", "off")
+	now := s.Now()
+	res, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO messages(alias, body, hop, origin, created_at, delivered_at, dst_peer, dst_link, dst_seq)
+		VALUES ('kipa@vm', 'marked delivered, never relayed', 0, 'human', ?, ?, 'vm', 'l', 1)`, now, now)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	fake.Advance(DefaultRetention + time.Hour)
+	if _, err := s.PruneNow(t.Context(), DefaultRetention, false); err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM messages WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Error("an outbound row with no relay result was pruned because delivered_at was set")
+	}
+}

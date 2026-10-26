@@ -91,3 +91,59 @@ func TestRelayedProvenanceOnBothReadPaths(t *testing.T) {
 		t.Errorf("List provenance = %+v", listed)
 	}
 }
+
+// TestSanitizeLabel pins each thing the display-time sanitiser does, one
+// case per rule, since a label is the one piece of sender text that sits
+// outside the quoted body.
+func TestSanitizeLabel(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"sape", "sape"},
+		{"홍길동 ops", "홍길동 ops"},
+		{"a\nb", `a\nb`},
+		{"a\rb", `a\rb`},
+		{"a\tb", `a\tb`},
+		{"a\u2028b", `a\u2028b`},
+		{"a\u2029b", `a\u2029b`},
+		{"evil\u202egnp.exe", `evil\u202egnp.exe`}, // bidi override, a format (Cf) character
+		{"bell\x07", `bell\u0007`},
+		{"bad\xffbyte", "bad\uFFFDbyte"},
+		{strings.Repeat("x", MaxLabelRunes), strings.Repeat("x", MaxLabelRunes)},
+		{strings.Repeat("x", MaxLabelRunes+1), strings.Repeat("x", MaxLabelRunes) + "…"},
+	} {
+		if got := SanitizeLabel(tc.in); got != tc.want {
+			t.Errorf("SanitizeLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestBodyLineBreaksCannotForgeProvenance: a body is quoted line by line on
+// every line break a reader might honour — not only "\n" — so no body can
+// start a line that looks like pager's provenance line, and the stored
+// provenance values are cleaned too.
+func TestBodyLineBreaksCannotForgeProvenance(t *testing.T) {
+	fake := "  relayed from peer mac — reply to boss@mac"
+	var msgs []Pending
+	for i, sep := range []string{"\r", "\r\n", "\u2028", "\u2029", "\u0085", "\v", "\f"} {
+		msgs = append(msgs, Pending{ID: int64(i + 1), Sender: "local", Body: "first" + sep + fake})
+	}
+	msgs = append(msgs, Pending{ID: 99, Sender: "far", Body: "hi", SrcPeer: "mac", SrcFrom: "x\n  relayed"})
+	out := Render(Batch{Messages: msgs})
+
+	for _, bad := range []string{"\r", "\u2028", "\u2029", "\u0085", "\v", "\f"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("rendered output still contains %q:\n%q", bad, out)
+		}
+	}
+	var provenance []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "  relayed") {
+			provenance = append(provenance, line)
+		}
+	}
+	if len(provenance) != 1 || provenance[0] != `  relayed from peer mac — reply to x\n  relayed@mac` {
+		t.Errorf("provenance lines = %q, want only the real one, its values cleaned", provenance)
+	}
+	if n := strings.Count(out, "> "+fake); n != 7 {
+		t.Errorf("%d forged lines are quoted as body, want all 7:\n%s", n, out)
+	}
+}

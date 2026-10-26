@@ -702,3 +702,26 @@ func TestListShowsRelayedProvenance(t *testing.T) {
 		t.Errorf("a body's continuation line is not marked as body:\n%s", got)
 	}
 }
+
+// TestListMarksEveryBodyLineBreak: msg_list marks each continuation line of a
+// body whatever line break started it, so a CR or a Unicode separator cannot
+// slip a line past the "> " marker.
+func TestListMarksEveryBodyLineBreak(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	t.Setenv("PAGER_SESSION", "me")
+	if _, err := deliver.Send(t.Context(), st, deliver.SendRequest{
+		Alias: "my-box", Body: "one\rtwo\u2028three\r\nfour", Human: true,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	s := start(t, st)
+	resp := s.call(2, "tools/call", map[string]any{"name": "msg_list", "arguments": map[string]any{}})
+	if isError(t, resp) {
+		t.Fatalf("msg_list failed: %s", text(t, resp))
+	}
+	got := text(t, resp)
+	if !strings.Contains(got, ": one\n> two\n> three\n> four\n") {
+		t.Errorf("continuation lines are not all marked:\n%q", got)
+	}
+}
