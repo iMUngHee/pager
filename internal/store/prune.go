@@ -39,7 +39,9 @@ type PruneResult struct {
 // deletable selects retention-expired messages that nothing still depends on.
 //
 // A message is done once it was delivered here or, for mail addressed to
-// another store, once that store gave it a final result. Outbound mail still
+// another store, once that store gave it a final result — and only by the
+// measure that fits it: outbound mail is never finished by delivered_at,
+// whatever sets it. Outbound mail still
 // waiting to leave has neither and is kept however old it is: deleting it would
 // lose it without anyone being told.
 //
@@ -49,7 +51,7 @@ type PruneResult struct {
 // unable to make progress. Excluding them is what lets prune stay quiet.
 const deletable = `
   SELECT id FROM messages
-   WHERE (delivered_at IS NOT NULL OR relayed_at IS NOT NULL)
+   WHERE ((dst_peer IS NULL AND delivered_at IS NOT NULL) OR (dst_peer IS NOT NULL AND relayed_at IS NOT NULL))
      AND created_at < ?
      AND id NOT IN (SELECT last_inbound_id FROM sessions WHERE last_inbound_id IS NOT NULL)
      AND id NOT IN (SELECT cause_id FROM messages WHERE cause_id IS NOT NULL)`

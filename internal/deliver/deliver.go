@@ -35,7 +35,7 @@ func Render(b Batch) string {
 		if line := ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
 			sb.WriteString("  " + line + "\n")
 		}
-		for line := range strings.SplitSeq(m.Body, "\n") {
+		for _, line := range BodyLines(m.Body) {
 			sb.WriteString("> ")
 			sb.WriteString(line)
 			sb.WriteString("\n")

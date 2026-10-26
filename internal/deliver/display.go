@@ -60,10 +60,27 @@ func ProvenanceLine(srcPeer, srcFrom string) string {
 	if srcPeer == "" {
 		return ""
 	}
+	// Both were validated on the way in; cleaning them again here keeps this
+	// line one line even if a row reached the store some other way.
+	srcPeer, srcFrom = clean(srcPeer, maxPeerName), clean(srcFrom, 128)
 	if srcFrom == "" {
 		return "relayed from peer " + srcPeer + " — no reply address; answer in your own output"
 	}
 	return "relayed from peer " + srcPeer + " — reply to " + srcFrom + "@" + srcPeer
+}
+
+// lineBreaks maps everything a reader might take for the end of a line onto
+// "\n": CRLF and a bare CR (which returns a terminal's cursor to the start of
+// the row), the Unicode line and paragraph separators, NEL, vertical tab and
+// form feed.
+var lineBreaks = strings.NewReplacer(
+	"\r\n", "\n", "\r", "\n", "\u2028", "\n", "\u2029", "\n", "\u0085", "\n", "\v", "\n", "\f", "\n")
+
+// BodyLines splits a body into the lines a reader could see. Splitting on
+// "\n" alone would let a body that uses any other line break start a line
+// that is not marked as body — one that could pass for pager's own.
+func BodyLines(body string) []string {
+	return strings.Split(lineBreaks.Replace(body), "\n")
 }
 
 // CleanReason folds a relay reason — text another store wrote — to one line

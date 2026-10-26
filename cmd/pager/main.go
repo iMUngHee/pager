@@ -286,11 +286,11 @@ func inbox(args []string) error {
 }
 
 func firstLine(body string) string {
-	line, _, cut := strings.Cut(body, "\n")
-	if cut {
-		return line + " …"
+	lines := deliver.BodyLines(body)
+	if len(lines) > 1 {
+		return lines[0] + " …"
 	}
-	return line
+	return lines[0]
 }
 
 // export writes the whole database to stdout as JSONL.

@@ -220,7 +220,7 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		// Lines after a body's first are prefixed so that no body text can
 		// stand where pager's own provenance line goes; the label is one line
 		// by construction.
-		body := strings.ReplaceAll(m.Body, "\n", "\n> ")
+		body := strings.Join(deliver.BodyLines(m.Body), "\n> ")
 		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), deliver.SanitizeLabel(m.Sender), m.Alias, body)
 		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
 			sb.WriteString("  " + line + "\n")

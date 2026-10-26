@@ -314,3 +314,20 @@ func TestRelayCarriesHopAcrossStores(t *testing.T) {
 		t.Fatalf("fourth reply: err = %v, want the hop limit", err)
 	}
 }
+
+// TestFirstLineStopsAtAnyLineBreak: pager ls shows only a body's first line,
+// and a carriage return — which would send a terminal's cursor back over the
+// row — ends that line like any other break.
+func TestFirstLineStopsAtAnyLineBreak(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"one line", "one line"},
+		{"one\ntwo", "one …"},
+		{"one\rtwo", "one …"},
+		{"one\r\ntwo", "one …"},
+		{"one\u2028two", "one …"},
+	} {
+		if got := firstLine(tc.in); got != tc.want {
+			t.Errorf("firstLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
