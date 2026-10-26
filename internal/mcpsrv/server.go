@@ -208,7 +208,14 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	// reported as already seen by the very response that is showing it.
 	var sb strings.Builder
 	for _, m := range messages {
-		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), m.Sender, m.Alias, m.Body)
+		// Lines after a body's first are prefixed so that no body text can
+		// stand where pager's own provenance line goes; the label is one line
+		// by construction.
+		body := strings.ReplaceAll(m.Body, "\n", "\n> ")
+		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), deliver.SanitizeLabel(m.Sender), m.Alias, body)
+		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
+			sb.WriteString("  " + line + "\n")
+		}
 	}
 	// A failed stamp must not cost the caller its mail: it already has the
 	// messages in hand, and losing them to bookkeeping would be the worse

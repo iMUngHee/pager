@@ -66,12 +66,25 @@ type Record struct {
 	// else in the record: without it a backup cannot tell a message nobody
 	// touched from one an agent read and left.
 	ListedAt *string `json:"listed_at"`
-	Body     string  `json:"body"`
+	// The relay fields: provenance of mail imported from another store
+	// (src_*), and the progress of mail addressed to one (dst_*, relayed_at,
+	// relay_result). All null for local mail.
+	SrcPeer     *string `json:"src_peer"`
+	SrcStore    *string `json:"src_store"`
+	SrcID       *int64  `json:"src_id"`
+	SrcFrom     *string `json:"src_from"`
+	DstPeer     *string `json:"dst_peer"`
+	DstLink     *string `json:"dst_link"`
+	DstSeq      *int64  `json:"dst_seq"`
+	RelayedAt   *string `json:"relayed_at"`
+	RelayResult *string `json:"relay_result"`
+	Body        string  `json:"body"`
 }
 
 // recordColumns is the SELECT list Record scans, in Record's own order.
 const recordColumns = `id, created_at, alias, sender_session, sender_label,
-	origin, cause_id, hop, delivered_at, delivery_seq, listed_at, body`
+	origin, cause_id, hop, delivered_at, delivery_seq, listed_at,
+	src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result, body`
 
 // archivePath is where a database's archive lives.
 func archivePath(dbPath string) string {
@@ -221,10 +234,28 @@ func eachRecord(rows *sql.Rows, fn func(Record) error) error {
 			delivered sql.NullInt64
 			seq       sql.NullInt64
 			listed    sql.NullInt64
+			srcPeer   sql.NullString
+			srcStore  sql.NullString
+			srcID     sql.NullInt64
+			srcFrom   sql.NullString
+			dstPeer   sql.NullString
+			dstLink   sql.NullString
+			dstSeq    sql.NullInt64
+			relayed   sql.NullInt64
+			result    sql.NullString
 		)
 		if err := rows.Scan(&r.ID, &created, &r.Alias, &sender, &r.SenderLabel,
-			&r.Origin, &cause, &r.Hop, &delivered, &seq, &listed, &r.Body); err != nil {
+			&r.Origin, &cause, &r.Hop, &delivered, &seq, &listed,
+			&srcPeer, &srcStore, &srcID, &srcFrom, &dstPeer, &dstLink, &dstSeq, &relayed, &result,
+			&r.Body); err != nil {
 			return fmt.Errorf("scan message: %w", err)
+		}
+		r.SrcPeer, r.SrcStore, r.SrcFrom = nullString(srcPeer), nullString(srcStore), nullString(srcFrom)
+		r.DstPeer, r.DstLink, r.RelayResult = nullString(dstPeer), nullString(dstLink), nullString(result)
+		r.SrcID, r.DstSeq = nullInt(srcID), nullInt(dstSeq)
+		if relayed.Valid {
+			stamp := archiveStamp(relayed.Int64)
+			r.RelayedAt = &stamp
 		}
 		r.V = archiveVersion
 		r.CreatedAt = archiveStamp(created)
@@ -273,4 +304,18 @@ func (s *Store) ExportAll(ctx context.Context, w io.Writer) (int, error) {
 		return nil
 	})
 	return n, err
+}
+
+func nullString(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	return &v.String
+}
+
+func nullInt(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	return &v.Int64
 }

@@ -226,7 +226,12 @@ func list(args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tINBOX\tFROM\tSTATE\tBODY")
 	for _, m := range messages {
-		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, m.Sender, m.State(), firstLine(m.Body))
+		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, deliver.SanitizeLabel(m.Sender), m.State(), firstLine(m.Body))
+		// Under the BODY column, on a row with no id: a row pager did not write
+		// cannot look like this one.
+		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
+			fmt.Fprintf(tw, "\t\t\t\t%s\n", line)
+		}
 	}
 	return tw.Flush()
 }
