@@ -1208,9 +1208,29 @@ func TestRelayOutDropsAnOverlongReplyName(t *testing.T) {
 
 // TestRelayOutDropsAnOverlongTool: the sender's host name is bounded like
 // every other field — a value longer than the receiver keeps is not sent, so
-// it cannot swell a record past the line bound.
+// it cannot swell a record past the line bound — while an ordinary one, and
+// one exactly at the bound, still go out.
 func TestRelayOutDropsAnOverlongTool(t *testing.T) {
 	a, _ := pair(t)
+	for _, tool := range []string{"claude", strings.Repeat("t", maxTool)} {
+		if err := a.st.RecordSession(t.Context(), store.SessionRecord{ID: "s-" + tool, Tool: tool, Root: "/tmp/ws"}); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		if ok, err := deliver.SetAlias(t.Context(), a.st, "n"+fmt.Sprint(len(tool)), "s-"+tool); err != nil || !ok {
+			t.Fatalf("alias: %v %v", ok, err)
+		}
+		sendRemote(t, a, "s-"+tool, "kipa", "hi")
+	}
+	for i, want := range []string{"claude", strings.Repeat("t", maxTool)} {
+		var rec Record
+		if err := json.Unmarshal(lines(out(t, a))[i], &rec); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if rec.Tool != want {
+			t.Errorf("record %d tool = %q, want %q", i, rec.Tool, want)
+		}
+	}
+
 	if err := a.st.RecordSession(t.Context(), store.SessionRecord{ID: "s-odd", Tool: strings.Repeat("t", maxTool+1), Root: "/tmp/ws"}); err != nil {
 		t.Fatalf("record: %v", err)
 	}
@@ -1219,7 +1239,7 @@ func TestRelayOutDropsAnOverlongTool(t *testing.T) {
 	}
 	sendRemote(t, a, "s-odd", "kipa", "hi")
 	var rec Record
-	if err := json.Unmarshal(lines(out(t, a))[0], &rec); err != nil {
+	if err := json.Unmarshal(lines(out(t, a))[2], &rec); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if rec.Tool != "" {
