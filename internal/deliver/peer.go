@@ -217,3 +217,166 @@ func RemovePeer(ctx context.Context, st *store.Store, name string) error {
 		return nil
 	})
 }
+
+// RebindPeer points an existing peer at a different store id, or re-pairs it
+// with the same one, and starts a new link.
+//
+// Mail still waiting for the peer moves to the new link, renumbered from 1 in
+// the order it was sent, in the same transaction that mints the link — so the
+// other store sees a fresh link with no gap, and a result still in flight for
+// the old link matches no row and changes nothing. What a transport already
+// carried to the old store cannot be recalled: if that store is still alive,
+// it may receive those messages too.
+func RebindPeer(ctx context.Context, st *store.Store, name, storeID string) (Peer, error) {
+	name, err := NormalizePeerName(name)
+	if err != nil {
+		return Peer{}, err
+	}
+	storeID = strings.ToLower(strings.TrimSpace(storeID))
+	if !validStoreID(storeID) {
+		return Peer{}, fmt.Errorf("store id %q is not 32 hex digits — copy it from `pager relay id` on that store", storeID)
+	}
+	link, err := newLinkID()
+	if err != nil {
+		return Peer{}, err
+	}
+	var p Peer
+	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		own, err := store.IDOn(ctx, c)
+		if err != nil {
+			return err
+		}
+		if storeID == own {
+			return errors.New("that is this store's own id; a peer is another store")
+		}
+		if err := c.QueryRowContext(ctx,
+			"SELECT added_at FROM peers WHERE name = ?", name).Scan(&p.AddedAt); errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w %q", ErrUnknownPeer, name)
+		} else if err != nil {
+			return fmt.Errorf("read peer %q: %w", name, err)
+		}
+		n, err := moveToLink(ctx, c, name, link)
+		if err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			"UPDATE peers SET store_id = ?, link_id = ?, out_seq = ? WHERE name = ?",
+			storeID, link, n, name); err != nil {
+			return fmt.Errorf("rebind peer %q: %w", name, err)
+		}
+		p = Peer{Name: name, StoreID: storeID, LinkID: link, OutSeq: n, AddedAt: p.AddedAt, Pending: int(n)}
+		return nil
+	})
+	if err != nil {
+		return Peer{}, err
+	}
+	return p, nil
+}
+
+// RotateStoreID gives this store a new id, and every peer a new link.
+//
+// It is what a store restored from a backup needs: the restore rolls its
+// sequence numbers and message ids back while keeping the id, so a peer would
+// answer genuinely new mail as already seen. With a new id every link is new on
+// both sides, and each peer must enrol the new id (`pager peer rebind` there)
+// before it accepts anything from this store again.
+//
+// It is refused while mail to any peer has no final result. A message's
+// original identity is the store id it was written under, and version 1 sends
+// it under the id of the link that carries it — so pending mail re-sent after
+// the change would look new to a peer that had already imported it, and arrive
+// twice. Cancel it first: `pager relay new-id --force` does that, telling each
+// sender.
+func RotateStoreID(ctx context.Context, st *store.Store) (string, error) {
+	id, err := newLinkID() // same shape and source as a store id
+	if err != nil {
+		return "", err
+	}
+	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		var pending int
+		if err := c.QueryRowContext(ctx,
+			"SELECT count(*) FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL").Scan(&pending); err != nil {
+			return fmt.Errorf("read pending mail: %w", err)
+		}
+		if pending > 0 {
+			return fmt.Errorf("%w: %d message(s) to peers have no final result; "+
+				"relay them first, or use --force to cancel them", ErrPeerHasPendingMail, pending)
+		}
+		return RelinkAll(ctx, c, id)
+	})
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// RelinkAll replaces this store's id with id and gives every peer a fresh link
+// with nothing on it. It runs on the caller's write transaction, which must
+// already have closed every outbound row that had no final result.
+func RelinkAll(ctx context.Context, c *sql.Conn, id string) error {
+	if !validStoreID(id) {
+		return fmt.Errorf("store id %q is not 32 hex digits", id)
+	}
+	if _, err := c.ExecContext(ctx,
+		"UPDATE store_identity SET id = ? WHERE singleton = 1", id); err != nil {
+		return fmt.Errorf("replace store id: %w", err)
+	}
+	rows, err := c.QueryContext(ctx, "SELECT name FROM peers ORDER BY name")
+	if err != nil {
+		return fmt.Errorf("read peers: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, name := range names {
+		link, err := newLinkID()
+		if err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			"UPDATE peers SET link_id = ?, out_seq = 0 WHERE name = ?", link, name); err != nil {
+			return fmt.Errorf("re-link peer %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// moveToLink renumbers the peer's mail that has no final result onto link,
+// 1..n in the order it was numbered before, and returns n.
+func moveToLink(ctx context.Context, c *sql.Conn, peer, link string) (int64, error) {
+	rows, err := c.QueryContext(ctx,
+		"SELECT id FROM messages WHERE dst_peer = ? AND relayed_at IS NULL ORDER BY dst_seq, id", peer)
+	if err != nil {
+		return 0, fmt.Errorf("read pending mail: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for i, id := range ids {
+		if _, err := c.ExecContext(ctx,
+			"UPDATE messages SET dst_link = ?, dst_seq = ? WHERE id = ?", link, i+1, id); err != nil {
+			return 0, fmt.Errorf("renumber message %d: %w", id, err)
+		}
+	}
+	return int64(len(ids)), nil
+}

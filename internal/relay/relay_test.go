@@ -749,3 +749,171 @@ func TestRelayBounceIsDeliveredOnce(t *testing.T) {
 		}
 	}
 }
+
+// pendingLinks returns (dst_link, dst_seq) of a's mail still waiting for vm.
+func pendingLinks(t *testing.T, a node) [][2]any {
+	t.Helper()
+	rows, err := a.st.DB().QueryContext(t.Context(),
+		"SELECT dst_link, dst_seq FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NULL ORDER BY id")
+	if err != nil {
+		t.Fatalf("read pending: %v", err)
+	}
+	defer rows.Close()
+	var out [][2]any
+	for rows.Next() {
+		var link string
+		var seq int64
+		if err := rows.Scan(&link, &seq); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		out = append(out, [2]any{link, seq})
+	}
+	return out
+}
+
+// TestRebindRenumbersAndIgnoresStaleResults: a rebind moves pending mail to a
+// new link numbered from 1, and a result still in flight for the old link —
+// here, the receiver's answers to the first export, acked only after the
+// rebind — matches nothing. Rebinding to a different store refuses that
+// store's predecessor's results outright.
+func TestRebindRenumbersAndIgnoresStaleResults(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	for i := 0; i < 3; i++ {
+		sendRemote(t, a, "s-sape", "kipa", fmt.Sprintf("message %d", i))
+	}
+	oldLinks := pendingLinks(t, a)
+	stale, _ := in(t, b, "mac", out(t, a))
+
+	p, err := deliver.RebindPeer(t.Context(), a.st, "vm", b.id)
+	if err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+	now := pendingLinks(t, a)
+	for i, l := range now {
+		if l[0] != p.LinkID || l[1] != int64(i+1) {
+			t.Errorf("pending row %d = %v, want (%s, %d)", i, l, p.LinkID, i+1)
+		}
+		if l[0] == oldLinks[i][0] {
+			t.Errorf("pending row %d still on the old link", i)
+		}
+	}
+	if p.OutSeq != 3 {
+		t.Errorf("out_seq after rebind = %d, want 3", p.OutSeq)
+	}
+
+	var batch []byte
+	for _, r := range stale {
+		batch = append(batch, encode(t, r)...)
+	}
+	if code := ack(t, a, batch); code != 0 {
+		t.Fatalf("ack of stale results: exit %d", code)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NOT NULL"); n != 0 {
+		t.Errorf("%d rows acked by results for a link that no longer carries them", n)
+	}
+
+	c := newNode(t)
+	if _, err := deliver.RebindPeer(t.Context(), a.st, "vm", c.id); err != nil {
+		t.Fatalf("rebind to another store: %v", err)
+	}
+	if code := ack(t, a, batch); code != 2 {
+		t.Errorf("results from the store vm used to be: exit %d, want 2", code)
+	}
+}
+
+// TestRebindReplayAdvancesLink: after a same-store rebind the receiver sees a
+// new link whose first records are messages it already imported. They are
+// answered as duplicates and still advance the link, so the record after them
+// imports instead of waiting on a gap — and the original-identity index is
+// never violated.
+func TestRebindReplayAdvancesLink(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	sendRemote(t, a, "s-sape", "kipa", "two")
+	if rs, _ := in(t, b, "mac", out(t, a)); len(rs) != 2 {
+		t.Fatalf("first import: %+v", rs)
+	} // results lost: both stay pending on a
+
+	p, err := deliver.RebindPeer(t.Context(), a.st, "vm", b.id)
+	if err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+	sendRemote(t, a, "s-sape", "kipa", "three")
+
+	rs, code := in(t, b, "mac", out(t, a))
+	if code != 0 || len(rs) != 3 {
+		t.Fatalf("after rebind: %+v exit %d", rs, code)
+	}
+	want := []string{StatusDuplicate, StatusDuplicate, StatusImported}
+	for i, r := range rs {
+		if r.Status != want[i] || r.Link.ID != p.LinkID {
+			t.Errorf("result %d = %s on %s, want %s on the new link", i, r.Status, r.Link.ID, want[i])
+		}
+	}
+	if got := inSeq(t, b, p.LinkID); got != 3 {
+		t.Errorf("in_seq of the new link = %d, want 3", got)
+	}
+	if n := count(t, b, "SELECT count(*) FROM messages WHERE src_peer = 'mac'"); n != 3 {
+		t.Errorf("%d rows imported, want 3", n)
+	}
+}
+
+// TestNewIDStartsFreshLinks: a store that takes a new id — what a restore
+// from backup calls for — starts new links under it, and its peer refuses it
+// until the new id is enrolled there. Mail still pending at that moment cannot
+// move to the new id: version 1 sends a message under the id of the link that
+// carries it, so a message the peer already imported would look new and arrive
+// twice. So a plain new-id is refused while mail is pending, and --force
+// cancels it first, telling each sender it may still arrive.
+func TestNewIDStartsFreshLinks(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	if rs, _ := in(t, b, "mac", out(t, a)); len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Fatalf("first import: %+v", rs)
+	} // its result is lost: "one" stays pending on a, though b has it
+
+	if _, err := deliver.RotateStoreID(t.Context(), a.st); !errors.Is(err, deliver.ErrPeerHasPendingMail) {
+		t.Fatalf("new-id with pending mail: err = %v, want ErrPeerHasPendingMail", err)
+	}
+	if got, _ := a.st.ID(t.Context()); got != a.id {
+		t.Fatalf("a refused new-id changed the store id")
+	}
+
+	id, err := ForceRotateStoreID(t.Context(), a.st, io.Discard)
+	if err != nil {
+		t.Fatalf("new-id --force: %v", err)
+	}
+	if got, _ := a.st.ID(t.Context()); got != id || id == a.id {
+		t.Fatalf("store id after rotate = %s (returned %s, was %s)", got, id, a.id)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE origin = 'caused' AND alias = 'sape' AND body LIKE '%may still arrive%'"); n != 1 {
+		t.Errorf("%d cancellation bounces, want 1", n)
+	}
+
+	sendRemote(t, a, "s-sape", "kipa", "two")
+	stream := out(t, a)
+	if got := len(lines(stream)); got != 1 {
+		t.Fatalf("relay out after new-id emits %d records, want only the new one:\n%s", got, stream)
+	}
+	rs, code := in(t, b, "mac", stream)
+	if code != 2 || len(rs) != 1 || !strings.Contains(rs[0].Reason, "wrong store") {
+		t.Fatalf("before re-enrolment: %+v exit %d, want refused(wrong store)", rs, code)
+	}
+
+	if _, err := deliver.RebindPeer(t.Context(), b.st, "mac", id); err != nil {
+		t.Fatalf("b enrols the new id: %v", err)
+	}
+	rs, code = in(t, b, "mac", stream)
+	if code != 0 || len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Errorf("after re-enrolment: %+v exit %d, want imported", rs, code)
+	}
+	if n := count(t, b, "SELECT count(*) FROM messages WHERE src_peer = 'mac' AND body = 'one'"); n != 1 {
+		t.Errorf("%q arrived %d times, want once", "one", n)
+	}
+}
