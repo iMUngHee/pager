@@ -22,6 +22,7 @@ import (
 	"github.com/iMUngHee/pager/internal/dispatch"
 	"github.com/iMUngHee/pager/internal/hookio"
 	"github.com/iMUngHee/pager/internal/mcpsrv"
+	"github.com/iMUngHee/pager/internal/relay"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
 )
@@ -48,6 +49,8 @@ var commands = []command{
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", serveMCP},
+	{"peer", "add <name> --store <id> | ls | rm <name> [--force]", "Manage the stores this one relays with", peerCmd},
+	{"relay", "id | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>", "Move messages between stores over any transport", relayCmd},
 }
 
 // openStore opens the standard database with the real clock.
@@ -544,6 +547,13 @@ func whoami(args []string) error {
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "pager: %v\n", err)
+		// The relay commands are driven by a transport rather than a person,
+		// and it needs to tell a cut stream it may simply retry (3) from a
+		// refusal someone has to look at (2). Everything else stays 1.
+		var exit *relay.ExitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.Code)
+		}
 		os.Exit(1)
 	}
 }

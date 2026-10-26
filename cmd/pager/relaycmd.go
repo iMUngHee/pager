@@ -1,0 +1,153 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"text/tabwriter"
+
+	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/relay"
+)
+
+// peerCmd manages the stores this one relays with.
+func peerCmd(args []string) error {
+	if len(args) == 0 {
+		return usageError("usage: pager peer add <name> --store <id> | ls | rm <name> [--force]")
+	}
+	ctx := context.Background()
+	switch args[0] {
+	case "add":
+		fs := flag.NewFlagSet("peer add", flag.ContinueOnError)
+		storeID := fs.String("store", "", "the other store's id, from `pager relay id` there")
+		if err := fs.Parse(permute(fs, args[1:])); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 || *storeID == "" {
+			return usageError("usage: pager peer add <name> --store <id>")
+		}
+		st, err := openStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		p, err := deliver.AddPeer(ctx, st, fs.Arg(0), *storeID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("added peer %s (store %s) — address its sessions as <name>@%s\n", p.Name, p.StoreID, p.Name)
+		return nil
+
+	case "ls":
+		if len(args) != 1 {
+			return usageError("usage: pager peer ls")
+		}
+		st, err := openStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		peers, err := deliver.ListPeers(ctx, st)
+		if err != nil {
+			return err
+		}
+		if len(peers) == 0 {
+			fmt.Println("no peers — register one with: pager peer add <name> --store <id>")
+			return nil
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tSTORE\tPENDING\tSENT")
+		for _, p := range peers {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\n", p.Name, p.StoreID, p.Pending, p.OutSeq)
+		}
+		return tw.Flush()
+
+	case "rm":
+		fs := flag.NewFlagSet("peer rm", flag.ContinueOnError)
+		force := fs.Bool("force", false, "cancel mail still waiting for this peer, telling each sender")
+		if err := fs.Parse(permute(fs, args[1:])); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return usageError("usage: pager peer rm <name> [--force]")
+		}
+		st, err := openStore(ctx)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		if *force {
+			return relay.ForceRemovePeer(ctx, st, fs.Arg(0), os.Stderr)
+		}
+		if err := deliver.RemovePeer(ctx, st, fs.Arg(0)); err != nil {
+			return err
+		}
+		fmt.Printf("removed peer %s\n", fs.Arg(0))
+		return nil
+	}
+	return usageError(fmt.Sprintf("unknown peer subcommand %q", args[0]))
+}
+
+// relayCmd is the store-side half of a relay. A transport runs these; pager
+// itself never opens a connection.
+func relayCmd(args []string) error {
+	if len(args) == 0 {
+		return usageError("usage: pager relay id | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>")
+	}
+
+	// A transport that stops reading closes the pipe under us. Ignoring
+	// SIGPIPE turns that into a write error, which the commands treat as
+	// "stop" — so relay in still pokes the sessions it already delivered to
+	// instead of dying mid-run. An interrupt likewise stops between records,
+	// after the current one has committed or rolled back.
+	signal.Ignore(syscall.SIGPIPE)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sub := args[0]
+	fs := flag.NewFlagSet("relay "+sub, flag.ContinueOnError)
+	peer := fs.String("peer", "", "the peer this stream goes to or comes from")
+	limit := fs.Int("limit", relay.DefaultLimit, fmt.Sprintf("most records to emit (1-%d)", relay.MaxLimit))
+	if err := fs.Parse(permute(fs, args[1:])); err != nil {
+		return usageError(err.Error())
+	}
+	if fs.NArg() != 0 {
+		return usageError(fmt.Sprintf("relay %s takes no arguments (got %q)", sub, fs.Arg(0)))
+	}
+	if sub != "id" && *peer == "" {
+		return usageError(fmt.Sprintf("relay %s needs --peer", sub))
+	}
+
+	st, err := openStore(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	switch sub {
+	case "id":
+		id, err := st.ID(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(id)
+		return nil
+	case "out":
+		return relay.Out(ctx, st, *peer, *limit, os.Stdout)
+	case "in":
+		return relay.In(ctx, st, *peer, os.Stdin, os.Stdout, os.Stderr)
+	case "ack":
+		return relay.Ack(ctx, st, *peer, os.Stdin, os.Stderr)
+	}
+	return usageError(fmt.Sprintf("unknown relay subcommand %q", sub))
+}
+
+// usageError is a usage mistake, which a transport must not mistake for a
+// cut stream it can retry.
+func usageError(msg string) error {
+	return &relay.ExitError{Code: 2, Err: errors.New(msg)}
+}
