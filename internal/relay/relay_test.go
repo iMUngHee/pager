@@ -1205,3 +1205,34 @@ func TestRelayOutDropsAnOverlongReplyName(t *testing.T) {
 		t.Errorf("from = %q, want it left out", *rec.From)
 	}
 }
+
+// TestRelayOutDropsAnOverlongTool: the sender's host name is bounded like
+// every other field — a value longer than the receiver keeps is not sent, so
+// it cannot swell a record past the line bound.
+func TestRelayOutDropsAnOverlongTool(t *testing.T) {
+	a, _ := pair(t)
+	if err := a.st.RecordSession(t.Context(), store.SessionRecord{ID: "s-odd", Tool: strings.Repeat("t", maxTool+1), Root: "/tmp/ws"}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if ok, err := deliver.SetAlias(t.Context(), a.st, "odd", "s-odd"); err != nil || !ok {
+		t.Fatalf("alias: %v %v", ok, err)
+	}
+	sendRemote(t, a, "s-odd", "kipa", "hi")
+	var rec Record
+	if err := json.Unmarshal(lines(out(t, a))[0], &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Tool != "" {
+		t.Errorf("tool = %q, want it left out", rec.Tool)
+	}
+}
+
+// TestRelayInRefusesAnOverlongLineNamingItself: the refusal of a line past the
+// bound says which store is answering, like every other refusal.
+func TestRelayInRefusesAnOverlongLineNamingItself(t *testing.T) {
+	_, b := pair(t)
+	rs, code := in(t, b, "mac", []byte(strings.Repeat("x", MaxLine+1)+"\n"))
+	if code != 2 || len(rs) != 1 || rs[0].Status != StatusRefused || rs[0].Store != b.id {
+		t.Errorf("overlong line: %+v exit %d, want one refusal naming store %s", rs, code, b.id)
+	}
+}

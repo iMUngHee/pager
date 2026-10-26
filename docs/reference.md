@@ -424,8 +424,9 @@ a `deferred` that has a time to wait for.
 identity in the store that wrote it. `from` is the sender's reply name, or
 `null`; `label` and `tool` are display only, and `sent_at` is informational —
 the receiver dates the message by its own clock. On a remote send the body is
-limited to 64 KiB, the label to 1 KiB and the name before `@` to 128 bytes, so
-no record can outgrow the line bound and block its link. `v` is the protocol
+limited to 64 KiB, the label to 1 KiB and the name before `@` to 128 bytes, and
+`relay out` leaves out a reply name or host name longer than the receiver keeps,
+so no record can outgrow the line bound and block its link. `v` is the protocol
 version. A field that changes what a receiver must do bumps it even when it is
 only added (a receiver that ignored it would act wrongly); purely descriptive
 fields may be added without a bump, and receivers ignore fields they do not
@@ -626,7 +627,8 @@ the store — the same authority `pager send --human` already has. A relay
 transport extends the boundary to wherever it runs, so run it as the same user
 and over an authenticated channel. Mail from another store is marked as such
 on a line pager writes; beyond the sender's name and reply name, each cleaned
-to one line, its text stays inside the quoted body.
+to one line, and a host name of at most 16 letters in the poke, its text stays
+inside the quoted body.
 
 ## When it breaks
 
