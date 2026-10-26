@@ -142,7 +142,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT m.id, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at
-		  FROM messages m JOIN aliases a ON a.alias = m.alias
+		  FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?
 		   AND m.delivered_at IS NULL
 		   AND m.created_at >= ?
@@ -180,7 +180,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	// batch never shrinks.
 	var expired int
 	if err := st.DB().QueryRowContext(ctx, `
-		SELECT count(*) FROM messages m JOIN aliases a ON a.alias = m.alias
+		SELECT count(*) FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ? AND `+undealtWith+` AND m.created_at < ?`,
 		session, windowStart).Scan(&expired); err != nil {
 		return nil, 0, fmt.Errorf("count expired: %w", err)
@@ -272,7 +272,7 @@ func revalidate(ctx context.Context, c *sql.Conn, session string, ids []int64, n
 	}
 
 	query := `
-		SELECT m.id FROM messages m JOIN aliases a ON a.alias = m.alias
+		SELECT m.id FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?
 		   AND m.delivered_at IS NULL
 		   AND m.created_at >= ?
