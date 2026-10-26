@@ -25,6 +25,7 @@ var migrations = [...]string{
 	ddl, // 0 -> 1
 	`ALTER TABLE messages ADD COLUMN listed_at INTEGER`, // 1 -> 2
 	`ALTER TABLE sessions ADD COLUMN purpose TEXT`,      // 2 -> 3
+	relayDDL, // 3 -> 4
 }
 
 // schemaVersion is the user_version this binary expects. len of an array is a
@@ -113,6 +114,61 @@ CREATE TABLE meta (
 );
 
 INSERT INTO meta(key) VALUES ('prune');
+`
+
+// relayDDL adds what relaying between stores needs, and is frozen like every
+// other entry.
+//
+// Everything is additive so that no existing row can make it fail: a rebuild of
+// messages would have to change two CHECK constraints, which is exactly the
+// migration the comment on migrations warns about. So a relayed message keeps
+// origin='human' with cause_id NULL — origin means "has no local cause row" —
+// and its provenance lives in the src_* columns beside it.
+//
+// The src_* columns describe a message that arrived from another store, keyed
+// by the store and id it was ORIGINALLY written under; the dst_* columns
+// describe one waiting to leave. peers holds the stores this one relays with,
+// each with the sequence allocator of its current outbound link, and
+// peer_links holds the high-water mark of every inbound link — a link is the
+// pair of stores plus the link_id minted when the pairing was (re)made.
+// store_identity is this database's own random id, which is what a peer
+// enrols.
+const relayDDL = `
+ALTER TABLE messages ADD COLUMN src_peer     TEXT;
+ALTER TABLE messages ADD COLUMN src_store    TEXT;
+ALTER TABLE messages ADD COLUMN src_id       INTEGER;
+ALTER TABLE messages ADD COLUMN src_from     TEXT;
+ALTER TABLE messages ADD COLUMN dst_peer     TEXT;
+ALTER TABLE messages ADD COLUMN dst_link     TEXT;
+ALTER TABLE messages ADD COLUMN dst_seq      INTEGER;
+ALTER TABLE messages ADD COLUMN relayed_at   INTEGER;
+ALTER TABLE messages ADD COLUMN relay_result TEXT;
+
+CREATE UNIQUE INDEX messages_src ON messages(src_store, src_id) WHERE src_store IS NOT NULL;
+CREATE INDEX messages_outbound ON messages(dst_peer, dst_seq) WHERE dst_peer IS NOT NULL AND relayed_at IS NULL;
+
+CREATE TABLE peers (
+  name     TEXT PRIMARY KEY,
+  store_id TEXT    NOT NULL,
+  link_id  TEXT    NOT NULL,
+  out_seq  INTEGER NOT NULL DEFAULT 0,
+  added_at INTEGER NOT NULL
+);
+
+CREATE TABLE peer_links (
+  link_id   TEXT PRIMARY KEY,
+  peer      TEXT    NOT NULL,
+  src_store TEXT    NOT NULL,
+  dst_store TEXT    NOT NULL,
+  in_seq    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE store_identity (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  id        TEXT NOT NULL
+);
+
+INSERT INTO store_identity(singleton, id) VALUES (1, lower(hex(randomblob(16))));
 `
 
 // migrate brings an open database up to schemaVersion.

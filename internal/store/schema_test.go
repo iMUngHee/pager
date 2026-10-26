@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -172,6 +173,7 @@ func TestMigrationsAreAppendOnly(t *testing.T) {
 		"9b773708f612d2ef8b37f61bc88dd2929c516f2616ef739279f1e270b917dec2", // 0 -> 1 (ddl)
 		"8b11f1573b1ecc6b99fd42ea5ae1dd367c4bcc7e49bf546615c5ae4e471ce802", // 1 -> 2 (listed_at)
 		"fa2044e78bcdadaa98616e6bea55f78f2e27910d4497ff96dbdf2b2dcc345747", // 2 -> 3 (purpose)
+		"9c304fea494ce99599800273d411ff86bc2bd3a5f922f41ec550701d0e0e2cb1", // 3 -> 4 (relay)
 	}
 	if len(want) != len(migrations) {
 		t.Fatalf("%d migrations but %d digests — append the new entry's digest", len(migrations), len(want))
@@ -213,12 +215,14 @@ func TestUpgradesAVersionOneDatabase(t *testing.T) {
 // TestUpgradeAddsThePurposeColumn is the same shape as the listed_at upgrade
 // above, for the column msg_roster reads.
 //
-// The fixture is schemaVersion-1 rather than schemaVersion, and the difference
-// is the whole test: openAtVersion replays every entry below its argument, so
-// seeding at the current version would hand back a database that already has
-// the column and the assertion below would pass without Open doing anything.
+// The fixture is version 2, the last one before the purpose migration, and the
+// difference is the whole test: openAtVersion replays every entry below its
+// argument, so seeding at or above version 3 would hand back a database that
+// already has the column and the assertion below would pass without Open doing
+// anything. It is a literal rather than schemaVersion-1 because that stopped
+// meaning "before purpose" the moment a later migration was appended.
 func TestUpgradeAddsThePurposeColumn(t *testing.T) {
-	path := openAtVersion(t, schemaVersion-1)
+	path := openAtVersion(t, 2)
 	if hasColumn(t, path, "sessions", "purpose") {
 		t.Fatal("the fixture already has purpose — it was not seeded below the migration that adds it")
 	}
@@ -294,6 +298,91 @@ func TestUpgradePreservesRows(t *testing.T) {
 	}
 	if listed != nil {
 		t.Errorf("listed_at = %v on an existing row, want NULL", listed)
+	}
+}
+
+// TestMigrationFourKeepsExistingRows upgrades a store that predates relaying.
+//
+// The fixture is version 3 — the last one before the relay entry — so the
+// assertions below can only pass if Open itself added the columns, the tables
+// and the store id. An existing message must come through untouched with every
+// relay column NULL, which is what marks it as local mail; and a fresh store
+// must get an id of its own, since two stores sharing one would defeat the
+// enrolment check that id exists for.
+func TestMigrationFourKeepsExistingRows(t *testing.T) {
+	path := openAtVersion(t, 3)
+	if hasColumn(t, path, "messages", "src_peer") {
+		t.Fatal("the fixture already has src_peer — it was not seeded below the relay migration")
+	}
+
+	seed, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatalf("open for seeding: %v", err)
+	}
+	if _, err := seed.ExecContext(t.Context(), `
+		INSERT INTO messages(alias, body, hop, origin, created_at)
+		VALUES ('inbox', 'written before relaying existed', 0, 'human', 1)`); err != nil {
+		t.Fatalf("seed a message: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seeding handle: %v", err)
+	}
+
+	s, err := Open(t.Context(), path, clock.NewFake(testBase))
+	if err != nil {
+		t.Fatalf("Open a version 3 database: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := userVersion(t, path); got != schemaVersion {
+		t.Errorf("user_version = %d after opening, want %d", got, schemaVersion)
+	}
+
+	var body string
+	var relay [9]any
+	if err := s.db.QueryRowContext(t.Context(), `
+		SELECT body, src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result
+		  FROM messages WHERE alias = 'inbox'`).Scan(&body,
+		&relay[0], &relay[1], &relay[2], &relay[3], &relay[4], &relay[5], &relay[6], &relay[7], &relay[8]); err != nil {
+		t.Fatalf("read the seeded message: %v", err)
+	}
+	if body != "written before relaying existed" {
+		t.Errorf("body = %q after the upgrade", body)
+	}
+	for i, v := range relay {
+		if v != nil {
+			t.Errorf("relay column %d = %v on an existing row, want NULL", i, v)
+		}
+	}
+
+	for _, table := range []string{"peers", "peer_links"} {
+		var n int
+		if err := s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM "+table).Scan(&n); err != nil {
+			t.Errorf("%s is missing after the upgrade: %v", table, err)
+		} else if n != 0 {
+			t.Errorf("%s has %d rows after the upgrade, want 0", table, n)
+		}
+	}
+
+	upgradedID, err := s.ID(t.Context())
+	if err != nil {
+		t.Fatalf("ID on the upgraded store: %v", err)
+	}
+	if len(upgradedID) != 32 || strings.Trim(upgradedID, "0123456789abcdef") != "" {
+		t.Errorf("store id = %q, want 32 lowercase hex digits", upgradedID)
+	}
+
+	fresh, err := Open(t.Context(), openAtVersion(t, 0), clock.NewFake(testBase))
+	if err != nil {
+		t.Fatalf("Open a fresh database: %v", err)
+	}
+	t.Cleanup(func() { _ = fresh.Close() })
+	freshID, err := fresh.ID(t.Context())
+	if err != nil {
+		t.Fatalf("ID on the fresh store: %v", err)
+	}
+	if freshID == upgradedID {
+		t.Errorf("two stores share the id %q", freshID)
 	}
 }
 
@@ -422,19 +511,20 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	// Four entries, joined at 1: three run, and the version recorded must be 4 —
+	// Five entries, joined at 1: four run, and the version recorded must be 5 —
 	// the length of what ran, not schemaVersion.
 	//
 	// The list grows whenever a real migration lands, because its whole job is
 	// to be a different length from schemaVersion. The guard below is what says
-	// so: it fired when the purpose migration made the real log three long,
-	// which is the failure that stops this test from quietly becoming a
-	// tautology.
+	// so: it fired when the purpose migration made the real log three long, and
+	// again when the relay migration made it four, which is the failure that
+	// stops this test from quietly becoming a tautology.
 	longer := []string{
 		migrations[0],
 		`ALTER TABLE messages ADD COLUMN listed_at INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only_too INTEGER`,
+		`ALTER TABLE messages ADD COLUMN probe_only_three INTEGER`,
 	}
 	if len(longer) == schemaVersion {
 		t.Fatalf("the fixture list is %d long, the same as schemaVersion — it cannot tell them apart", len(longer))
