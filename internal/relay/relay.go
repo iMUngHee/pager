@@ -17,9 +17,7 @@ package relay
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -256,7 +254,11 @@ func Out(ctx context.Context, st *store.Store, peer string, limit int, w io.Writ
 				if from == "" {
 					from = r.sender
 				}
-				r.rec.From = &from
+				// A name the receiver would drop anyway is not sent, which also
+				// keeps an overlong alias from swelling the record.
+				if len(from) <= maxFrom {
+					r.rec.From = &from
+				}
 				if r.rec.Tool, err = sessionTool(ctx, c, r.sender); err != nil {
 					return fmt.Errorf("read sender tool: %w", err)
 				}
@@ -308,6 +310,21 @@ func In(ctx context.Context, st *store.Store, peer string, in io.Reader, out, di
 		return &ExitError{Code: 2, Err: err}
 	}
 
+	// Answered before reading anything, so a transport pointed at the wrong
+	// peer name learns it even from an empty stream, and every refusal below
+	// can say which store is answering.
+	own, err := st.ID(ctx)
+	if err != nil {
+		return &ExitError{Code: 1, Err: err}
+	}
+	var known int
+	if err := st.DB().QueryRowContext(ctx, "SELECT count(*) FROM peers WHERE name = ?", name).Scan(&known); err != nil {
+		return &ExitError{Code: 1, Err: fmt.Errorf("read peer %q: %w", name, err)}
+	}
+	if known == 0 {
+		return exitf(2, "%w %q (pager peer ls)", deliver.ErrUnknownPeer, name)
+	}
+
 	var woken []recipient
 	defer func() { pokeAll(context.WithoutCancel(ctx), woken, diag) }()
 
@@ -323,14 +340,17 @@ func In(ctx context.Context, st *store.Store, peer string, in io.Reader, out, di
 		case errors.Is(err, errTruncated):
 			return &ExitError{Code: 3, Err: errors.New("input ended inside a record; it was not applied — resend")}
 		case errors.Is(err, errLineTooLong):
-			return refuse(out, Result{}, "malformed: "+err.Error())
+			return refuse(out, Result{Store: own}, "malformed: "+err.Error())
 		case err != nil:
 			return &ExitError{Code: 1, Err: fmt.Errorf("read records: %w", err)}
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue // a blank line carries no record; a transport may add one
 		}
 
 		var rec Record
 		if err := json.Unmarshal(line, &rec); err != nil {
-			return refuse(out, Result{}, "malformed: "+err.Error())
+			return refuse(out, Result{Store: own}, "malformed: "+err.Error())
 		}
 
 		res, to, stop, err := importOne(ctx, st, name, rec)
@@ -715,7 +735,7 @@ func Ack(ctx context.Context, st *store.Store, peer string, in io.Reader, diag i
 	}
 
 	fmt.Fprintf(diag, "acked %d, bounced %d, ignored %d\n", acked, len(bounced), ignored)
-	pokeAll(ctx, bounced, diag)
+	pokeAll(context.WithoutCancel(ctx), bounced, diag) // committed: tell them even if interrupted
 	if truncated {
 		return &ExitError{Code: 3, Err: errors.New("input ended inside a result line; the complete lines were applied")}
 	}
@@ -726,8 +746,8 @@ func Ack(ctx context.Context, st *store.Store, peer string, in io.Reader, diag i
 //
 // The recipient is a name the sending session holds as this transaction
 // commits. A send with no session, or a session that holds no name any more,
-// gets no bounce — the outcome stays on the row, where `pager peer ls` and
-// export show it. Like any local mail, the bounce follows its alias: if that
+// gets no bounce — the outcome stays on the row, in its relay_result, which
+// export shows. Like any local mail, the bounce follows its alias: if that
 // name passes to another session before it is delivered, the new holder reads
 // it.
 //
@@ -824,7 +844,7 @@ func ForceRemovePeer(ctx context.Context, st *store.Store, peer string, diag io.
 		return err
 	}
 	fmt.Fprintf(diag, "removed peer %s; cancelled %d, bounced %d\n", name, cancelled, len(bounced))
-	pokeAll(ctx, bounced, diag)
+	pokeAll(context.WithoutCancel(ctx), bounced, diag)
 	return nil
 }
 
@@ -833,13 +853,10 @@ func ForceRemovePeer(ctx context.Context, st *store.Store, peer string, diag io.
 // arrive. See deliver.RotateStoreID for why pending mail cannot simply move to
 // the new id.
 func ForceRotateStoreID(ctx context.Context, st *store.Store, diag io.Writer) (string, error) {
-	id, err := newStoreID()
-	if err != nil {
-		return "", err
-	}
+	var id string
 	var bounced []recipient
 	var cancelled int
-	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+	err := st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
 		bounced, cancelled = bounced[:0], 0
 		rows, err := c.QueryContext(ctx,
 			"SELECT id, dst_peer FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL ORDER BY id")
@@ -881,22 +898,13 @@ func ForceRotateStoreID(ctx context.Context, st *store.Store, diag io.Writer) (s
 				bounced = append(bounced, to)
 			}
 		}
-		return deliver.RelinkAll(ctx, c, id)
+		id, err = deliver.RelinkAll(ctx, c)
+		return err
 	})
 	if err != nil {
 		return "", err
 	}
 	fmt.Fprintf(diag, "new store id %s; cancelled %d, bounced %d\n", id, cancelled, len(bounced))
-	pokeAll(ctx, bounced, diag)
+	pokeAll(context.WithoutCancel(ctx), bounced, diag)
 	return id, nil
-}
-
-// newStoreID mints a store id: 32 lowercase hex digits from crypto/rand, the
-// shape the relay migration generates.
-func newStoreID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("mint store id: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
 }

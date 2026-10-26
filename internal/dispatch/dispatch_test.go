@@ -179,3 +179,27 @@ func TestSendReportsTheMessageWhenLaterLookupsFail(t *testing.T) {
 		t.Errorf("result after a late failure = %+v (head %q); want the stored message", res, res.Head())
 	}
 }
+
+// TestSendReportsTheMessageWhenSenderToolFails covers the other lookup after
+// the write: the sender's tool, read only to word the poke. The sessions table
+// is replaced by a view that has everything else, so only that read fails.
+func TestSendReportsTheMessageWhenSenderToolFails(t *testing.T) {
+	st := newStore(t)
+	named(t, st, "s-kipa", "kipa", "")
+	named(t, st, "s-sape", "sape", "")
+	for _, q := range []string{
+		"ALTER TABLE sessions RENAME TO sessions_all",
+		"CREATE VIEW sessions AS SELECT session_id, root, heartbeat_at, last_inbound_id, causal_epoch, host_pid, host_start FROM sessions_all",
+	} {
+		if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	res, err := Send(t.Context(), st, Request{Target: "kipa", Body: "x", Sender: "s-sape", Label: "sape", Probe: alive})
+	if err == nil {
+		t.Fatal("Send succeeded although the sender's tool could not be read")
+	}
+	if res.Sent.ID == 0 {
+		t.Errorf("result after a late failure = %+v; want the stored message", res)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"text/tabwriter"
 
@@ -140,7 +141,25 @@ func relayCmd(args []string) error {
 	if fs.NArg() != 0 {
 		return usageError(fmt.Sprintf("relay %s takes no arguments (got %q)", sub, fs.Arg(0)))
 	}
-	if sub != "id" && sub != "new-id" && *peer == "" {
+	// Each subcommand takes only its own flags; one given to the wrong
+	// subcommand is refused rather than quietly ignored.
+	takes := map[string][]string{
+		"id": nil, "new-id": {"force"}, "out": {"peer", "limit"}, "in": {"peer"}, "ack": {"peer"},
+	}
+	allowed, known := takes[sub]
+	if !known {
+		return usageError(fmt.Sprintf("unknown relay subcommand %q", sub))
+	}
+	var stray error
+	fs.Visit(func(f *flag.Flag) {
+		if stray == nil && !slices.Contains(allowed, f.Name) {
+			stray = usageError(fmt.Sprintf("relay %s does not take --%s", sub, f.Name))
+		}
+	})
+	if stray != nil {
+		return stray
+	}
+	if slices.Contains(allowed, "peer") && *peer == "" {
 		return usageError(fmt.Sprintf("relay %s needs --peer", sub))
 	}
 

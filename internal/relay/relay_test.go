@@ -200,7 +200,9 @@ func TestRelayInDecisionTable(t *testing.T) {
 		seqAfter int64 // in_seq of L after the record
 		cont     bool  // whether the probe was answered
 		exit     int
+		noResult bool // refused before any line is read: no result at all
 	}
+	var reboundTo string // set by the rebind row's prep
 	next := func(mut func(*Record)) func(a, b node) Record {
 		return func(a, b node) Record {
 			r := record(a, b, L, 2, 2, "kipa")
@@ -212,7 +214,7 @@ func TestRelayInDecisionTable(t *testing.T) {
 	}
 	cases := []tc{
 		// Placement.
-		{name: "unregistered peer", peer: "nobody", rec: next(nil), status: StatusRefused, reason: "unknown peer", seqAfter: 1, exit: 2},
+		{name: "unregistered peer", peer: "nobody", rec: next(nil), noResult: true, seqAfter: 1, exit: 2},
 		{name: "not json", raw: []byte("not json\n"), status: StatusRefused, reason: "malformed", seqAfter: 1, exit: 2},
 		{name: "wrong field type", raw: []byte(`{"v":"1","kind":"msg"}` + "\n"), status: StatusRefused, reason: "malformed", seqAfter: 1, exit: 2},
 		{name: "kind missing", rec: next(func(r *Record) { r.Kind = "" }), status: StatusRefused, reason: "malformed", seqAfter: 1, exit: 2},
@@ -234,11 +236,38 @@ func TestRelayInDecisionTable(t *testing.T) {
 			peer: "mac2", rec: next(nil), status: StatusRefused, reason: "link mismatch", seqAfter: 1, exit: 2,
 		},
 		{name: "unknown link not starting at 1", rec: next(func(r *Record) { r.Link.ID = "link-M" }), status: StatusRefused, reason: "unknown link", seqAfter: 1, exit: 2},
+		{
+			name: "known link from a store mac was rebound away from",
+			prep: func(t *testing.T, a, b node) {
+				other := newNode(t)
+				if _, err := deliver.RebindPeer(t.Context(), b.st, "mac", other.id); err != nil {
+					t.Fatalf("rebind: %v", err)
+				}
+				reboundTo = other.id
+			},
+			rec: func(a, b node) Record {
+				r := record(a, b, L, 2, 2, "kipa")
+				r.Link.Store, r.Origin.Store = reboundTo, reboundTo // L itself is still known as a's
+				return r
+			},
+			status: StatusRefused, reason: "link mismatch", seqAfter: 1, exit: 2,
+		},
 
 		// Already consumed.
 		{name: "consumed, invalid origin", rec: next(func(r *Record) { r.Link.Seq = 1; r.Origin.Store = strings.Repeat("e", 32) }), status: StatusRejected, reason: "previously rejected", seqAfter: 1, cont: true},
 		{name: "consumed, row exists", rec: next(func(r *Record) { r.Link.Seq = 1; r.Origin.ID = 1 }), status: StatusDuplicate, seqAfter: 1, cont: true},
 		{name: "consumed, no row", rec: next(func(r *Record) { r.Link.Seq = 1; r.Origin.ID = 99 }), status: StatusRejected, reason: "previously rejected", seqAfter: 1, cont: true},
+		{
+			name: "consumed, foreign origin that exists here",
+			prep: func(t *testing.T, a, b node) {
+				if _, err := b.st.DB().ExecContext(t.Context(), `
+					INSERT INTO messages(alias, body, hop, origin, created_at, src_peer, src_store, src_id)
+					VALUES ('kipa', 'x', 0, 'human', ?, 'lab', ?, 1)`, b.st.Now(), strings.Repeat("e", 32)); err != nil {
+					t.Fatalf("seed foreign row: %v", err)
+				}
+			},
+			rec: next(func(r *Record) { r.Link.Seq = 1; r.Origin.ID = 1; r.Origin.Store = strings.Repeat("e", 32) }), status: StatusRejected, reason: "previously rejected", seqAfter: 1, cont: true,
+		},
 
 		// Ahead of the link.
 		{name: "gap", rec: next(func(r *Record) { r.Link.Seq = 3 }), status: StatusDeferred, reason: "gap", seqAfter: 1},
@@ -312,6 +341,15 @@ func TestRelayInDecisionTable(t *testing.T) {
 			rs, code := in(t, b, peer, stream)
 			if code != c.exit {
 				t.Errorf("exit = %d, want %d (results %+v)", code, c.exit, rs)
+			}
+			if c.noResult {
+				if len(rs) != 0 {
+					t.Errorf("results = %+v, want none: the run is refused before reading", rs)
+				}
+				if got := inSeq(t, b, L); got != c.seqAfter {
+					t.Errorf("in_seq of L = %d, want %d", got, c.seqAfter)
+				}
+				return
 			}
 			if len(rs) == 0 {
 				t.Fatalf("no result for the record under test")
@@ -915,5 +953,255 @@ func TestNewIDStartsFreshLinks(t *testing.T) {
 	}
 	if n := count(t, b, "SELECT count(*) FROM messages WHERE src_peer = 'mac' AND body = 'one'"); n != 1 {
 		t.Errorf("%q arrived %d times, want once", "one", n)
+	}
+}
+
+// TestRelayInRefusesUnknownPeerBeforeReading: a --peer that is not registered
+// is refused before any line is read — even from an empty stream — and a
+// refusal of a line says which store is answering.
+func TestRelayInRefusesUnknownPeerBeforeReading(t *testing.T) {
+	_, b := pair(t)
+	if _, code := in(t, b, "nobody", nil); code != 2 {
+		t.Errorf("empty stream for an unregistered peer: exit %d, want 2", code)
+	}
+	rs, code := in(t, b, "mac", []byte("not json\n"))
+	if code != 2 || len(rs) != 1 || rs[0].Status != StatusRefused || rs[0].Store != b.id {
+		t.Errorf("malformed line: %+v exit %d, want one refusal naming store %s", rs, code, b.id)
+	}
+}
+
+// TestRelayInSkipsBlankLines: a blank line carries no record and is not a
+// reason to stop, so a transport that adds one does not stall the link.
+func TestRelayInSkipsBlankLines(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	sendRemote(t, a, "s-sape", "kipa", "two")
+	ls := lines(out(t, a))
+	stream := append(append(append([]byte("\n"), ls[0]...), "\r\n  \n"...), ls[1]...)
+	rs, code := in(t, b, "mac", stream)
+	if code != 0 || len(rs) != 2 || rs[0].Status != StatusImported || rs[1].Status != StatusImported {
+		t.Errorf("results = %+v exit %d, want two imports", rs, code)
+	}
+}
+
+// TestDedupeKeysOnOriginStore: two stores may each send their message #1. A
+// duplicate is the same original identity — store and id — never the id alone.
+func TestDedupeKeysOnOriginStore(t *testing.T) {
+	a, b := pair(t)
+	c := newNode(t)
+	if _, err := deliver.AddPeer(t.Context(), c.st, "vm", b.id); err != nil {
+		t.Fatalf("c adds vm: %v", err)
+	}
+	if _, err := deliver.AddPeer(t.Context(), b.st, "lab", c.id); err != nil {
+		t.Fatalf("b adds lab: %v", err)
+	}
+	session(t, a, "s-sape", "sape")
+	session(t, c, "s-lima", "lima")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "from a")
+	sendRemote(t, c, "s-lima", "kipa", "from c")
+
+	if rs, _ := in(t, b, "mac", out(t, a)); len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Fatalf("from a: %+v", rs)
+	}
+	if rs, _ := in(t, b, "lab", out(t, c)); len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Errorf("from c, the same message id in another store: %+v, want imported", rs)
+	}
+}
+
+// TestAckLeavesNonFinalResultsPending: a deferred result is not an outcome;
+// the message stays pending and goes out again.
+func TestAckLeavesNonFinalResultsPending(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	rs, _ := in(t, b, "mac", out(t, a))
+	deferred := rs[0]
+	deferred.Status, deferred.Reason = StatusDeferred, "gap"
+	if code := ack(t, a, encode(t, deferred)); code != 0 {
+		t.Fatalf("ack: exit %d", code)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NULL"); n != 1 {
+		t.Errorf("%d rows still pending after a deferred result, want 1", n)
+	}
+	if got := len(lines(out(t, a))); got != 1 {
+		t.Errorf("relay out emits %d records after a deferred result, want 1", got)
+	}
+}
+
+// TestAckBouncesOnlyRejections: imported and duplicate results close their
+// message without telling the sender anything.
+func TestAckBouncesOnlyRejections(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	stream := out(t, a)
+	first, _ := in(t, b, "mac", stream)
+	again, _ := in(t, b, "mac", stream)
+	if code := ack(t, a, append(encode(t, first[0]), encode(t, again[0])...)); code != 0 {
+		t.Fatalf("ack: exit %d", code)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE origin = 'caused'"); n != 0 {
+		t.Errorf("%d bounces written for delivered mail", n)
+	}
+}
+
+// TestRelayInWakesWhomItDelivered runs with wake enabled against an empty
+// HOME, so a poke attempt is visible as the "not poked" note: relay in tries
+// to wake each recipient it imported for, once, after committing.
+func TestRelayInWakesWhomItDelivered(t *testing.T) {
+	t.Setenv("PAGER_WAKE", "on")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	sendRemote(t, a, "s-sape", "kipa", "two")
+
+	var diag bytes.Buffer
+	if err := In(t.Context(), b.st, "mac", bytes.NewReader(out(t, a)), io.Discard, &diag); err != nil {
+		t.Fatalf("relay in: %v", err)
+	}
+	if n := strings.Count(diag.String(), "kipa was not poked"); n != 1 {
+		t.Errorf("wake attempts reported %d times, want once for the one recipient:\n%s", n, diag.String())
+	}
+}
+
+// TestRelayInKeepsTheHop: the imported row carries the hop the message had in
+// the store that wrote it — the loop guard across stores rests on it.
+func TestRelayInKeepsTheHop(t *testing.T) {
+	a, b := pair(t)
+	session(t, b, "s-kipa", "kipa")
+	r := record(a, b, "link-L", 1, 7, "kipa")
+	r.Hop = 2
+	if rs, _ := in(t, b, "mac", encode(t, r)); len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Fatalf("import: %+v", rs)
+	}
+	if n := count(t, b, "SELECT count(*) FROM messages WHERE src_id = 7 AND hop = 2"); n != 1 {
+		t.Error("the imported row does not carry hop 2")
+	}
+}
+
+// TestInboundCapIsPerPeer: one peer at its cap does not hold back another.
+func TestInboundCapIsPerPeer(t *testing.T) {
+	a, b := pair(t)
+	session(t, b, "s-kipa", "kipa")
+	for i := 0; i < maxInboundPeer; i++ {
+		if _, err := b.st.DB().ExecContext(t.Context(), `
+			INSERT INTO messages(alias, body, hop, origin, created_at, src_peer, src_store, src_id)
+			VALUES ('kipa', 'x', 0, 'human', ?, 'lab', ?, ?)`, b.st.Now(), strings.Repeat("e", 32), i+1); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if rs, _ := in(t, b, "mac", encode(t, record(a, b, "link-L", 1, 1, "kipa"))); len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Errorf("mac while lab is at its cap: %+v, want imported", rs)
+	}
+}
+
+// TestRebindRenumbersFromOneAfterPartialAck: after part of a link has been
+// acknowledged, a rebind still numbers what is left from 1 — otherwise the
+// receiver would refuse the new link as starting mid-way.
+func TestRebindRenumbersFromOneAfterPartialAck(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	for i := 0; i < 3; i++ {
+		sendRemote(t, a, "s-sape", "kipa", fmt.Sprintf("message %d", i))
+	}
+	rs, _ := in(t, b, "mac", out(t, a))
+	if code := ack(t, a, encode(t, rs[0])); code != 0 {
+		t.Fatalf("ack: exit %d", code)
+	}
+	p, err := deliver.RebindPeer(t.Context(), a.st, "vm", b.id)
+	if err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+	got := pendingLinks(t, a)
+	if len(got) != 2 || got[0] != [2]any{p.LinkID, int64(1)} || got[1] != [2]any{p.LinkID, int64(2)} {
+		t.Fatalf("pending after rebind = %v, want seq 1 and 2 on the new link", got)
+	}
+	rs, code := in(t, b, "mac", out(t, a))
+	if code != 0 || len(rs) != 2 || rs[0].Status != StatusDuplicate || rs[1].Status != StatusDuplicate {
+		t.Errorf("after rebind: %+v exit %d, want two duplicates on a link the receiver accepts", rs, code)
+	}
+}
+
+// TestNewIDSucceedsWithoutPendingMail: with nothing waiting to leave — local
+// mail and finished relay history do not count — a plain new-id goes ahead.
+func TestNewIDSucceedsWithoutPendingMail(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-kipa", "kipa")
+	if _, err := deliver.Send(t.Context(), a.st, deliver.SendRequest{Alias: "sape", Body: "local", Human: true}); err != nil {
+		t.Fatalf("local send: %v", err)
+	}
+	sendRemote(t, a, "s-sape", "kipa", "one")
+	rs, _ := in(t, b, "mac", out(t, a))
+	if code := ack(t, a, encode(t, rs[0])); code != 0 {
+		t.Fatalf("ack: exit %d", code)
+	}
+	id, err := deliver.RotateStoreID(t.Context(), a.st)
+	if err != nil {
+		t.Fatalf("new-id with nothing pending: %v", err)
+	}
+	if got, _ := a.st.ID(t.Context()); got != id || id == a.id {
+		t.Errorf("store id = %s after rotate (returned %s, was %s)", got, id, a.id)
+	}
+}
+
+// TestForceNewIDCancelsEveryPendingRowOnEveryPeer: --force closes all of it,
+// across peers, before the id changes, so nothing is left to go out under the
+// new id.
+func TestForceNewIDCancelsEveryPendingRowOnEveryPeer(t *testing.T) {
+	a, _ := pair(t)
+	c := newNode(t)
+	if _, err := deliver.AddPeer(t.Context(), a.st, "lab", c.id); err != nil {
+		t.Fatalf("add lab: %v", err)
+	}
+	session(t, a, "s-sape", "sape")
+	for i := 0; i < 2; i++ {
+		sendRemote(t, a, "s-sape", "kipa", fmt.Sprintf("to vm %d", i))
+		label, _ := deliver.SenderLabel(t.Context(), a.st, "s-sape")
+		if _, err := deliver.Send(t.Context(), a.st, deliver.SendRequest{
+			Alias: "kipa@lab", Peer: "lab", Body: fmt.Sprintf("to lab %d", i), Sender: "s-sape", Label: label,
+		}); err != nil {
+			t.Fatalf("send to lab: %v", err)
+		}
+	}
+	if _, err := ForceRotateStoreID(t.Context(), a.st, io.Discard); err != nil {
+		t.Fatalf("new-id --force: %v", err)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL"); n != 0 {
+		t.Errorf("%d rows still pending after new-id --force", n)
+	}
+	if n := count(t, a, "SELECT count(*) FROM messages WHERE origin = 'caused' AND alias = 'sape'"); n != 4 {
+		t.Errorf("%d bounces, want 4", n)
+	}
+	for _, peer := range []string{"vm", "lab"} {
+		var buf bytes.Buffer
+		if err := Out(t.Context(), a.st, peer, DefaultLimit, &buf); err != nil || buf.Len() != 0 {
+			t.Errorf("relay out --peer %s after new-id --force: %q, %v", peer, buf.String(), err)
+		}
+	}
+}
+
+// TestRelayOutDropsAnOverlongReplyName: a reply name the receiver would drop is
+// not sent at all, so a long alias cannot swell the record.
+func TestRelayOutDropsAnOverlongReplyName(t *testing.T) {
+	a, _ := pair(t)
+	long := strings.Repeat("n", maxFrom+1)
+	session(t, a, "s-long", long)
+	sendRemote(t, a, "s-long", "kipa", "hi")
+	var rec Record
+	if err := json.Unmarshal(lines(out(t, a))[0], &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.From != nil {
+		t.Errorf("from = %q, want it left out", *rec.From)
 	}
 }

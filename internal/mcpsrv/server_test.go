@@ -725,3 +725,44 @@ func TestListMarksEveryBodyLineBreak(t *testing.T) {
 		t.Errorf("continuation lines are not all marked:\n%q", got)
 	}
 }
+
+// TestSendSaysItIsStoredOnALateFailure: when a lookup after the write fails,
+// msg_send's error still says the message was sent, so the agent does not
+// send it again.
+func TestSendSaysItIsStoredOnALateFailure(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	seed(t, st, "you", "your-box")
+	t.Setenv("PAGER_SESSION", "me")
+	for _, q := range []string{
+		"ALTER TABLE sessions RENAME TO sessions_all",
+		"CREATE VIEW sessions AS SELECT session_id, tool, root, pm_ref, heartbeat_at, causal_epoch, seq_cursor, last_inbound_id, last_inbound_seq, claim_hint_at, host_client, purpose FROM sessions_all",
+	} {
+		if _, err := st.DB().ExecContext(t.Context(), q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	s := start(t, st)
+	resp := s.call(2, "tools/call", map[string]any{
+		"name": "msg_send", "arguments": map[string]any{"target": "your-box", "body": "hi"},
+	})
+	got := text(t, resp)
+	if !isError(t, resp) || !strings.HasPrefix(got, "sent #1 to your-box") || !strings.Contains(got, "the message is stored") {
+		t.Errorf("msg_send after a late failure = %q (error %v)", got, isError(t, resp))
+	}
+}
+
+// TestRosterListsPeers: msg_roster ends with the peer line once a peer is
+// registered.
+func TestRosterListsPeers(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	if _, err := deliver.AddPeer(t.Context(), st, "vm", "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("add peer: %v", err)
+	}
+	s := start(t, st)
+	got := roster(t, s, 2)
+	if !strings.Contains(got, "\npeers: vm (no relay seen)") {
+		t.Errorf("msg_roster lacks the peer line:\n%s", got)
+	}
+}

@@ -83,6 +83,14 @@ func BodyLines(body string) []string {
 	return strings.Split(lineBreaks.Replace(body), "\n")
 }
 
+// CleanLine escapes every control and line-reshaping character in one line of
+// text, with no length cap. It is for a terminal: there, an escape sequence or
+// a backspace can move the cursor and paint a row pager did not write, which a
+// split on line breaks alone does not stop.
+func CleanLine(s string) string {
+	return clean(s, -1)
+}
+
 // CleanReason folds a relay reason — text another store wrote — to one line
 // fit to quote in a bounce.
 func CleanReason(reason string) string {

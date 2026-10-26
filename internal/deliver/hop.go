@@ -54,6 +54,15 @@ var (
 	ErrBodyTooLarge = errors.New("message body is too large to relay")
 )
 
+// Limits on what a remote send puts into its relay record. Every field the
+// record carries is bounded at send time, so no record can outgrow the relay
+// reader's line bound and block its link: the body here, the label and the
+// recipient's name below, the sender's reply name when the record is written.
+const (
+	MaxRelayLabel = 1 << 10 // bytes; delivery shows only the first 64 runes anyway
+	MaxRelayName  = 128     // bytes, for the name before '@'
+)
+
 // MaxRelayBody is the largest body, in bytes of UTF-8, that may be addressed
 // to another store. The relay stream escapes every non-ASCII character, which
 // can make a line up to six times longer than its body, and a line must stay
@@ -100,6 +109,12 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 		}
 		if len(req.Body) > MaxRelayBody {
 			return Sent{}, fmt.Errorf("%w: %d bytes, the limit for another store is %d", ErrBodyTooLarge, len(req.Body), MaxRelayBody)
+		}
+		if len(req.Label) > MaxRelayLabel {
+			return Sent{}, fmt.Errorf("send: label is %d bytes, the limit for another store is %d", len(req.Label), MaxRelayLabel)
+		}
+		if name := strings.TrimSuffix(req.Alias, "@"+req.Peer); len(name) > MaxRelayName {
+			return Sent{}, fmt.Errorf("send: name %d bytes long before @%s, the limit is %d", len(name), req.Peer, MaxRelayName)
 		}
 	}
 
