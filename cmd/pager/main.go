@@ -120,14 +120,13 @@ func send(args []string) error {
 	res, err := dispatch.Send(ctx, st, dispatch.Request{
 		Target: target, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
 	})
-	if err != nil {
-		return err
+	if res.Sent.ID != 0 { // stored, even if reporting on it failed
+		fmt.Println(res.Head())
+		for _, line := range res.Lines {
+			fmt.Println(line)
+		}
 	}
-	fmt.Println(res.Head())
-	for _, line := range res.Lines {
-		fmt.Println(line)
-	}
-	return nil
+	return err
 }
 
 // alias points a name at this session.

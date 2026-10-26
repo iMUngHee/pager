@@ -143,6 +143,10 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		Target: target, Body: body, Sender: sender, Label: label,
 	})
 	if err != nil {
+		if res.Sent.ID != 0 {
+			// Stored already: say so, or the agent will send it again.
+			return mcp.NewToolResultError(res.Head() + "\nnote: the message is stored; reporting on its recipient failed: " + err.Error()), nil
+		}
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	out := res.Head()

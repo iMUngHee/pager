@@ -184,3 +184,23 @@ func TestAddPeerRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveExactIgnoresWiderTiers pins ResolveExact's own contract: the
+// exact alias or nothing. A fragment that the wider tiers would accept is
+// refused, which is what keeps a legacy alias containing '@' from being
+// reached — or matched — by anything but its own spelling.
+func TestResolveExactIgnoresWiderTiers(t *testing.T) {
+	st, _ := newStore(t)
+	addSession(t, st, "s1", workspace, "")
+	legacyAlias(t, st, "old@box", "s1")
+
+	if got, err := ResolveExact(t.Context(), st, "old@box"); err != nil || got.Alias != "old@box" || got.SessionID != "s1" {
+		t.Errorf("ResolveExact(old@box) = %+v, %v", got, err)
+	}
+	if got, err := ResolveTarget(t.Context(), st, "old@bo", stale); err != nil || got.Alias != "old@box" {
+		t.Fatalf("precondition: the wider tiers match old@bo to %+v, %v — this test proves nothing", got, err)
+	}
+	if got, err := ResolveExact(t.Context(), st, "old@bo"); !errors.Is(err, ErrNoTarget) {
+		t.Errorf("ResolveExact(old@bo) = %+v, %v; want ErrNoTarget", got, err)
+	}
+}
