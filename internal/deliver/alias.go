@@ -73,7 +73,7 @@ var targetTiers = []struct {
 	namesASession bool
 	livesOnly     bool
 }{
-	{"alias", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`, false, false},
+	{"alias", exactAliasQuery, false, false},
 	{"session", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE session_id = ?1`, true, false},
 	// pm_ref is "KEY/id", so addressing by the bare id is a suffix match.
 	// substr with a negative offset counts from the end; LIKE is avoided
@@ -137,6 +137,23 @@ func ResolveTarget(ctx context.Context, st *store.Store, ref string, staleAfter 
 		}
 	}
 	return Target{}, fmt.Errorf("%w: %q", ErrNoTarget, ref)
+}
+
+// exactAliasQuery is the first tier: a reference that is an alias's own name.
+const exactAliasQuery = `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE alias = ?1`
+
+// ResolveExact resolves a reference by its exact alias spelling and nothing
+// else. It is what a legacy alias containing '@' gets: through the wider tiers
+// such a name could match a different one.
+func ResolveExact(ctx context.Context, st *store.Store, alias string) (Target, error) {
+	found, err := matchTargets(ctx, st, exactAliasQuery, alias)
+	if err != nil {
+		return Target{}, fmt.Errorf("resolve target by alias: %w", err)
+	}
+	if len(found) == 0 {
+		return Target{}, fmt.Errorf("%w: %q", ErrNoTarget, alias)
+	}
+	return found[0], nil
 }
 
 // oneSession reports whether every match belongs to the same, known session.

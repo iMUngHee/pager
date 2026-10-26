@@ -206,3 +206,19 @@ func TestSendRefusesOversizedRemoteBody(t *testing.T) {
 		t.Errorf("out_seq = %d after a breaker refusal, want 1", got)
 	}
 }
+
+// TestSendRefusesAddressOffItsPeer: a remote send whose address does not end
+// in the peer it names is a caller bug, refused before anything is written.
+func TestSendRefusesAddressOffItsPeer(t *testing.T) {
+	st, _ := newStore(t)
+	mustAddPeer(t, st, "vm")
+	if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa@lab", Peer: "vm", Body: "x", Human: true}); err == nil {
+		t.Error("Send(kipa@lab, peer vm) succeeded")
+	}
+	if got := outSeq(t, st, "vm"); got != 0 {
+		t.Errorf("out_seq = %d after a refused send, want 0", got)
+	}
+	if n := messageCount(t, st); n != 0 {
+		t.Errorf("%d rows written", n)
+	}
+}

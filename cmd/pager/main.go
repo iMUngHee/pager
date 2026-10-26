@@ -19,11 +19,11 @@ import (
 
 	"github.com/iMUngHee/pager/internal/clock"
 	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/dispatch"
 	"github.com/iMUngHee/pager/internal/hookio"
 	"github.com/iMUngHee/pager/internal/mcpsrv"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
-	"github.com/iMUngHee/pager/internal/wake"
 )
 
 // command is one pager subcommand. This table is the single source of truth
@@ -80,10 +80,9 @@ func resolveSession(ctx context.Context, st *store.Store, flagValue string) (str
 	return ref.SessionID, nil
 }
 
-// send leaves a message for another session.
-//
-// The target is resolved before the send so an unknown or ambiguous name fails
-// with the candidates rather than queueing mail nobody will read.
+// send leaves a message for another session, in this store or, addressed as
+// name@peer, in another one. The sequence itself — resolve, write, report on
+// who is behind the name — is dispatch.Send, shared with the MCP server.
 func send(args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	session := fs.String("session", "", "sending session id")
@@ -115,45 +114,14 @@ func send(args []string) error {
 		return deliver.ErrUnattributed
 	}
 
-	found, err := deliver.ResolveTarget(ctx, st, target, store.DefaultStale)
-	if err != nil {
-		return err
-	}
-	if *label == "" {
-		if *label, err = deliver.SenderLabel(ctx, st, ref.SessionID); err != nil {
-			return err
-		}
-	}
-
-	sent, err := deliver.Send(ctx, st, deliver.SendRequest{
-		Alias: found.Alias, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
+	res, err := dispatch.Send(ctx, st, dispatch.Request{
+		Target: target, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("sent #%d to %s (hop %d, %s)\n", sent.ID, found.Alias, sent.Hop, sent.Origin)
-
-	// Who is behind the name decides whether poking it means anything. A
-	// stranded holder cannot answer a poke, and telling the sender it "will be
-	// delivered on its next activity" — which is what wake says of anything it
-	// could not reach — promises an activity that is not coming.
-	presence, err := deliver.PresenceOf(ctx, st, found, sessionref.AliveAt)
-	if err != nil {
-		return err
-	}
-	if line := presence.Note(found.Alias); line != "" {
-		fmt.Println(line)
-		return nil
-	}
-
-	// The message is already stored, so nothing below can cost a delivery. A
-	// poke only decides whether the recipient reads it now or the next time it
-	// runs, which is why wake reports an outcome instead of returning an error.
-	tool, err := deliver.SenderTool(ctx, st, ref.SessionID)
-	if err != nil {
-		return err
-	}
-	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, *label, tool)), found.Alias); line != "" {
+	fmt.Println(res.Head())
+	for _, line := range res.Lines {
 		fmt.Println(line)
 	}
 	return nil

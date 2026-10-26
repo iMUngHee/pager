@@ -2,6 +2,7 @@ package deliver
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/iMUngHee/pager/internal/store"
@@ -137,10 +138,49 @@ func TestPeerRemoveRefusedWithPendingMail(t *testing.T) {
 	if err := RemovePeer(t.Context(), st, "vm"); err != nil {
 		t.Fatalf("RemovePeer once nothing is pending: %v", err)
 	}
-	if peers, _ := ListPeers(t.Context(), st); len(peers) != 0 {
-		t.Errorf("peers after remove = %+v, want none", peers)
+	if peers, err := ListPeers(t.Context(), st); err != nil || len(peers) != 0 {
+		t.Errorf("peers after remove = %+v, %v; want none", peers, err)
 	}
 	if err := RemovePeer(t.Context(), st, "vm"); !errors.Is(err, ErrUnknownPeer) {
 		t.Errorf("RemovePeer of a removed peer: err = %v, want ErrUnknownPeer", err)
+	}
+}
+
+// TestAddPeerRefusals covers the registrations AddPeer turns away: a name
+// already taken, this store's own id, an id of the wrong shape, and names a
+// transport could not safely put on a command line. A refused add writes
+// nothing.
+func TestAddPeerRefusals(t *testing.T) {
+	st, _ := newStore(t)
+	own, err := st.ID(t.Context())
+	if err != nil {
+		t.Fatalf("store id: %v", err)
+	}
+	mustAddPeer(t, st, "vm")
+
+	for _, tc := range []struct{ name, store string }{
+		{"vm", otherStore},   // taken
+		{"lab", own},         // this store
+		{"lab", "not-an-id"}, // malformed id
+		{"lab", strings.ToUpper(otherStore[:31])}, // wrong length
+		{"", otherStore},
+		{strings.Repeat("a", maxPeerName+1), otherStore},
+		{"-lab", otherStore},
+		{"la b", otherStore},
+		{"lab;rm", otherStore},
+		{"läb", otherStore},
+	} {
+		if _, err := AddPeer(t.Context(), st, tc.name, tc.store); err == nil {
+			t.Errorf("AddPeer(%q, %q) succeeded, want a refusal", tc.name, tc.store)
+		}
+	}
+	if peers, err := ListPeers(t.Context(), st); err != nil || len(peers) != 1 {
+		t.Errorf("peers after refusals = %+v, %v; want only vm", peers, err)
+	}
+
+	for _, ok := range []string{"lab", "LAB-2", "a", strings.Repeat("z", maxPeerName)} {
+		if _, err := NormalizePeerName(ok); err != nil {
+			t.Errorf("NormalizePeerName(%q): %v", ok, err)
+		}
 	}
 }

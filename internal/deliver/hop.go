@@ -48,9 +48,9 @@ var (
 	// ErrBreakerOpen means a rate limit tripped.
 	ErrBreakerOpen = errors.New("send rate limit reached")
 	// ErrBodyTooLarge refuses a remote send whose body would not fit the relay
-	// protocol. It is decided here, before a sequence number is allocated,
-	// because a message refused after it had one would leave a gap the other
-	// store waits on forever.
+	// protocol. It is decided when the message is sent rather than when it
+	// leaves, because a message dropped after it had committed a sequence
+	// number would leave a gap the other store waits on forever.
 	ErrBodyTooLarge = errors.New("message body is too large to relay")
 )
 
@@ -129,11 +129,12 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			return err
 		}
 
-		// A remote send takes the next number of the peer's current link only
-		// now, after every refusal above, so a refused send never consumes one.
-		// The UPDATE is also the enrolment check: a peer removed since the
-		// address was parsed returns no row, and the whole transaction rolls
-		// back.
+		// A remote send takes the next number of the peer's current link
+		// inside this transaction, so any refusal — above or after — rolls the
+		// number back with everything else; it is taken last only so that
+		// nothing it does depends on that. The UPDATE is also the enrolment
+		// check: a peer removed since the address was parsed returns no row,
+		// and the whole transaction rolls back.
 		var link sql.NullString
 		var seq sql.NullInt64
 		if req.Peer != "" {

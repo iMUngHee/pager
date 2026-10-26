@@ -17,9 +17,9 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/dispatch"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
-	"github.com/iMUngHee/pager/internal/wake"
 )
 
 const (
@@ -66,9 +66,11 @@ func (s *Server) register() {
 		mcp.NewTool("msg_send",
 			mcp.WithDescription(
 				"Leave a message for another agent session. The recipient sees it the next time their session is active — "+
-					"there is no interruption and no delivery receipt. Address them by alias, session id, or pm task ref."),
+					"there is no interruption and no delivery receipt. Address them by alias, session id, or pm task ref; "+
+					"a session in another store is name@peer, which is queued here and carried by the relay."),
 			mcp.WithString("target", mcp.Required(),
-				mcp.Description("Who to page: an alias, a session id, a pm ref, or a unique fragment of an alias.")),
+				mcp.Description("Who to page: an alias, a session id, a pm ref, a unique fragment of an alias, "+
+					"or name@peer for a session in a registered peer store.")),
 			mcp.WithString("body", mcp.Required(),
 				mcp.Description("What to tell them. Long bodies are truncated on delivery.")),
 			mcp.WithString("label",
@@ -130,45 +132,21 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	found, err := deliver.ResolveTarget(ctx, s.st, target, store.DefaultStale)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if label == "" {
-		if label, err = deliver.SenderLabel(ctx, s.st, sender); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-	}
 
 	// Human is never asserted here. It is an operator's claim about themselves,
 	// and everything arriving over MCP is by definition an agent acting.
-	sent, err := deliver.Send(ctx, s.st, deliver.SendRequest{
-		Alias: found.Alias, Body: body, Sender: sender, Label: label,
+	//
+	// The rest is the CLI's own sequence, shared through dispatch: it used to be
+	// copied here, and the copies drifted precisely because one branch was
+	// unreachable and so nobody read either.
+	res, err := dispatch.Send(ctx, s.st, dispatch.Request{
+		Target: target, Body: body, Sender: sender, Label: label,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-
-	out := fmt.Sprintf("sent #%d to %s (hop %d, %s)", sent.ID, found.Alias, sent.Hop, sent.Origin)
-
-	// Same question, same sentence as the CLI. It used to be answered here in
-	// wording of its own, and the two drifted precisely because the branch was
-	// unreachable and so nobody read either copy.
-	presence, err := deliver.PresenceOf(ctx, s.st, found, sessionref.AliveAt)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	tool, err := deliver.SenderTool(ctx, s.st, sender)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	if line := presence.Note(found.Alias); line != "" {
-		out += "\n" + line
-	} else if line := wake.Describe(
-		wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool)), found.Alias,
-	); line != "" {
-		// Reported, never fatal. The message is stored either way; a poke only
-		// moves when the recipient reads it.
+	out := res.Head()
+	for _, line := range res.Lines {
 		out += "\n" + line
 	}
 	return mcp.NewToolResultText(out), nil
