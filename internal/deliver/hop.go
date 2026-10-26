@@ -47,7 +47,18 @@ var (
 	ErrHopExceeded = errors.New("causal chain is too deep")
 	// ErrBreakerOpen means a rate limit tripped.
 	ErrBreakerOpen = errors.New("send rate limit reached")
+	// ErrBodyTooLarge refuses a remote send whose body would not fit the relay
+	// protocol. It is decided here, before a sequence number is allocated,
+	// because a message refused after it had one would leave a gap the other
+	// store waits on forever.
+	ErrBodyTooLarge = errors.New("message body is too large to relay")
 )
+
+// MaxRelayBody is the largest body, in bytes of UTF-8, that may be addressed
+// to another store. The relay stream escapes every non-ASCII character, which
+// can make a line up to six times longer than its body, and a line must stay
+// under the reader's 1 MiB bound. Delivery cuts bodies far shorter anyway.
+const MaxRelayBody = 64 << 10
 
 // SendRequest describes one outgoing message.
 //
@@ -55,7 +66,8 @@ var (
 // session most recently took delivery of, read inside the same transaction that
 // writes the message, so a caller cannot understate its own depth.
 type SendRequest struct {
-	Alias  string // resolved target alias
+	Alias  string // resolved target alias, or "name@peer" for a remote send
+	Peer   string // registered peer for a remote send; empty for local mail
 	Body   string
 	Sender string // sending session; empty when unattributed
 	Label  string // how the recipient sees the sender
@@ -81,6 +93,14 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 	}
 	if !req.Human && req.Sender == "" {
 		return Sent{}, ErrUnattributed
+	}
+	if req.Peer != "" {
+		if !strings.HasSuffix(req.Alias, "@"+req.Peer) {
+			return Sent{}, fmt.Errorf("send: %q is not an address on peer %q", req.Alias, req.Peer)
+		}
+		if len(req.Body) > MaxRelayBody {
+			return Sent{}, fmt.Errorf("%w: %d bytes, the limit for another store is %d", ErrBodyTooLarge, len(req.Body), MaxRelayBody)
+		}
 	}
 
 	var out Sent
@@ -109,10 +129,31 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			return err
 		}
 
+		// A remote send takes the next number of the peer's current link only
+		// now, after every refusal above, so a refused send never consumes one.
+		// The UPDATE is also the enrolment check: a peer removed since the
+		// address was parsed returns no row, and the whole transaction rolls
+		// back.
+		var link sql.NullString
+		var seq sql.NullInt64
+		if req.Peer != "" {
+			err := c.QueryRowContext(ctx,
+				"UPDATE peers SET out_seq = out_seq + 1 WHERE name = ? RETURNING link_id, out_seq",
+				req.Peer).Scan(&link, &seq)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w %q", ErrUnknownPeer, req.Peer)
+			}
+			if err != nil {
+				return fmt.Errorf("allocate relay sequence: %w", err)
+			}
+		}
+
 		res, err := c.ExecContext(ctx, `
-			INSERT INTO messages(alias, sender_session, sender_label, body, hop, origin, cause_id, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			req.Alias, nullable(req.Sender), req.Label, req.Body, hop, origin, cause, st.Now())
+			INSERT INTO messages(alias, sender_session, sender_label, body, hop, origin, cause_id, created_at,
+			                     dst_peer, dst_link, dst_seq)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			req.Alias, nullable(req.Sender), req.Label, req.Body, hop, origin, cause, st.Now(),
+			nullable(req.Peer), link, seq)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -206,9 +247,14 @@ func checkBreaker(ctx context.Context, c *sql.Conn, now int64, req SendRequest, 
 	// Everything without a cause shares one budget, including a session's own
 	// spontaneous sends. Such a send cannot itself be part of a loop — the
 	// reply it provokes is what carries a cause — so a coarse cap is enough.
+	//
+	// Rows imported from a peer also have no local cause, but they are not
+	// this store's sends: counting them would let another store's traffic use
+	// up the local operator's budget. They are bounded by the relay's own
+	// per-peer cap instead.
 	var human int
 	if err := c.QueryRowContext(ctx, `
-		SELECT count(*) FROM messages WHERE cause_id IS NULL AND created_at >= ?`,
+		SELECT count(*) FROM messages WHERE cause_id IS NULL AND src_peer IS NULL AND created_at >= ?`,
 		since).Scan(&human); err != nil {
 		return fmt.Errorf("count human sends: %w", err)
 	}

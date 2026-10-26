@@ -123,7 +123,7 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 	query := `
 		SELECT m.id, m.alias, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at,
 		       m.delivered_at IS NOT NULL, m.listed_at IS NOT NULL, m.created_at < ?
-		  FROM messages m JOIN aliases a ON a.alias = m.alias
+		  FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?`
 	args := []any{windowStart, session}
 	switch f {

@@ -30,6 +30,9 @@ type Target struct {
 // ErrNoTarget reports a reference that matched nothing.
 var ErrNoTarget = errors.New("no alias matches")
 
+// ErrAliasHasAt refuses a new alias containing '@', which addresses a peer.
+var ErrAliasHasAt = errors.New("an alias cannot contain '@' — name@peer addresses a session in another store")
+
 // AmbiguousError reports a reference that matched several aliases. Picking one
 // would deliver to the wrong session, so resolution fails and hands back the
 // candidates for the sender to choose from.
@@ -210,7 +213,16 @@ func matchTargets(ctx context.Context, st *store.Store, query string, args ...an
 // excluded.session_id is not available there. The ON CONFLICT predicate is what
 // keeps this from moving an alias another session holds, and must survive any
 // change to the value above it.
+//
+// A name containing '@' is refused: name@peer is how a sender addresses a
+// session in another store, and a local alias spelled the same way would make
+// that address mean two things. Aliases created before this rule keep working —
+// ClaimAlias still takes them over — but no new one can be made.
 func SetAlias(ctx context.Context, st *store.Store, alias, session string) (bool, error) {
+	alias = strings.TrimSpace(alias)
+	if strings.Contains(alias, "@") {
+		return false, fmt.Errorf("%w: %q", ErrAliasHasAt, alias)
+	}
 	res, err := st.Exec(ctx, `
 		INSERT INTO aliases(alias, session_id, root, tool, updated_at)
 		SELECT ?, s.session_id, s.root, s.tool,
@@ -219,7 +231,7 @@ func SetAlias(ctx context.Context, st *store.Store, alias, session string) (bool
 		  FROM sessions s WHERE s.session_id = ?
 		ON CONFLICT(alias) DO UPDATE SET updated_at = excluded.updated_at
 		 WHERE aliases.session_id = excluded.session_id`,
-		strings.TrimSpace(alias), st.Now(), session)
+		alias, st.Now(), session)
 	if err != nil {
 		return false, fmt.Errorf("set alias: %w", err)
 	}
@@ -320,7 +332,7 @@ func OrphanAliases(ctx context.Context, st *store.Store, root, tool string, stal
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT a.alias, count(m.id)
 		  FROM aliases a
-		  JOIN messages m ON m.alias = a.alias AND m.delivered_at IS NULL
+		  JOIN messages m ON m.alias = a.alias AND m.delivered_at IS NULL AND m.dst_peer IS NULL
 		 WHERE a.root = ? AND a.tool = ?
 		   AND (a.session_id IS NULL
 		        OR NOT EXISTS (SELECT 1 FROM sessions o

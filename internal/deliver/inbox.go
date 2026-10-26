@@ -54,7 +54,7 @@ func Inboxes(ctx context.Context, st *store.Store) ([]Inbox, error) {
 		SELECT m.alias, COUNT(m.id),
 		       COALESCE(a.session_id, ''), COALESCE(s.host_pid, 0), COALESCE(s.host_start, 0)
 		  FROM messages m
-		  JOIN aliases a ON a.alias = m.alias
+		  JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		  LEFT JOIN sessions s ON s.session_id = a.session_id
 		 WHERE `+undealtWith+`
 		 GROUP BY m.alias
