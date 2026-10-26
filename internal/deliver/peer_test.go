@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iMUngHee/pager/internal/store"
 )
@@ -202,5 +203,49 @@ func TestResolveExactIgnoresWiderTiers(t *testing.T) {
 	}
 	if got, err := ResolveExact(t.Context(), st, "old@bo"); !errors.Is(err, ErrNoTarget) {
 		t.Errorf("ResolveExact(old@bo) = %+v, %v; want ErrNoTarget", got, err)
+	}
+}
+
+// TestRosterPeerFooter: no footer at all without peers, so a store that never
+// relays shows exactly what it did before; with peers, the last relay is what
+// this store observed — an applied result or an import — and a cancellation,
+// being a local act, never counts as one.
+func TestRosterPeerFooter(t *testing.T) {
+	st, fake := newStore(t)
+	if peers, err := PeersSeen(t.Context(), st); err != nil || FormatPeerFooter(peers, st.Now()) != "" {
+		t.Fatalf("footer without peers = %q (%v), want none", FormatPeerFooter(peers, st.Now()), err)
+	}
+
+	mustAddPeer(t, st, "vm")
+	if _, err := AddPeer(t.Context(), st, "lab", "fedcba9876543210fedcba9876543210"); err != nil {
+		t.Fatalf("add lab: %v", err)
+	}
+	if _, err := AddPeer(t.Context(), st, "mac", "00112233445566778899aabbccddeeff"); err != nil {
+		t.Fatalf("add mac: %v", err)
+	}
+	now := st.Now()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := st.DB().ExecContext(t.Context(), q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec(`INSERT INTO messages(alias, body, hop, origin, created_at, dst_peer, dst_link, dst_seq, relayed_at, relay_result)
+	      VALUES ('kipa@vm', 'x', 0, 'human', ?, 'vm', 'l', 1, ?, 'imported')`, now, now)
+	exec(`INSERT INTO messages(alias, body, hop, origin, created_at, dst_peer, dst_link, dst_seq, relayed_at, relay_result)
+	      VALUES ('kipa@lab', 'x', 0, 'human', ?, 'lab', 'l', 1, ?, 'cancelled: peer removed (may still arrive)')`, now, now)
+	exec(`INSERT INTO messages(alias, body, hop, origin, created_at, src_peer, src_store, src_id)
+	      VALUES ('kipa', 'x', 0, 'human', ?, 'mac', 'x', 1)`, now-int64(2*time.Hour/time.Millisecond))
+	fake.Advance(3 * time.Minute)
+
+	peers, err := PeersSeen(t.Context(), st)
+	if err != nil {
+		t.Fatalf("PeersSeen: %v", err)
+	}
+	got := FormatPeerFooter(peers, st.Now())
+	want := "\npeers: lab (no relay seen), mac (last relay 2h ago, observed locally), vm (last relay 3m ago, observed locally)" +
+		" — address their sessions as name@peer; remote names are learned from mail they send you\n"
+	if got != want {
+		t.Errorf("footer\n got %q\nwant %q", got, want)
 	}
 }

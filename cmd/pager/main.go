@@ -489,7 +489,12 @@ func who(args []string) error {
 	if err != nil {
 		return err
 	}
+	peers, err := deliver.PeersSeen(ctx, st)
+	if err != nil {
+		return err
+	}
 	fmt.Print(deliver.FormatRoster(entries, st.Now(), sessionref.AliveAt, false))
+	fmt.Print(deliver.FormatPeerFooter(peers, st.Now()))
 	return nil
 }
 

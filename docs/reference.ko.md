@@ -137,6 +137,17 @@ pager alias review-box                   # 이름을 직접 고르기 (자동 �
 pager claim review-box                   # 오프라인 수신함 이어받기
 pager prune --dry-run                    # 보관 기한 지난 것 확인
 pager export > backup.jsonl              # 저장소 전체를 JSONL로
+
+pager send kipa@vm "…"                   # 다른 저장소의 세션 (저장소 사이의 relay 참고)
+pager relay id                           # 이 저장소의 id — peer가 등록할 값
+pager peer add vm --store <id>           # 다른 저장소를 이름으로 등록
+pager peer ls                            # peer 목록과 각각 나갈 차례를 기다리는 메일 수
+pager peer rm vm [--force]               # peer 지우기 (--force는 pending 메일을 취소한다)
+pager peer rebind vm --store <id>        # peer를 다른 저장소 id로, 또는 다시 짝짓기
+pager relay new-id [--force]             # 이 저장소에 새 id (백업에서 복원한 뒤)
+pager relay out --peer vm                # transport 쪽: 나갈 차례인 레코드
+pager relay in --peer laptop             # transport 쪽: 레코드를 수입하고 결과를 낸다
+pager relay ack --peer vm                # transport 쪽: 결과를 반영한다
 ```
 
 **"챙겼다"는 두 가지를 함께 뜻한다.** 훅이 메시지를 세션 컨텍스트에 주입했거나(STATE `delivered`),
@@ -243,6 +254,152 @@ hica   2        unknown
 같은 레포에서 어제 쓰던 별칭을 오늘 세션이 물려받으면 그건 오배달이다. 이어받기는
 `pager claim`으로 **명시적으로** 한다. 이어받을 수 있는 수신함이 있으면 훅이 세션당 한 번 알려준다.
 
+## 저장소 사이의 relay
+
+머신마다 자기 저장소를 쓰고, 위의 모든 것은 그 안에서만 일어난다. 다른 머신의 세션에 닿으려면 두
+저장소를 **peer**로 짝짓고, 직접 돌리는 무언가 — **transport** — 가 그 사이로 메일을 옮긴다.
+pager는 네트워크 연결을 열지 않는다. 줄을 읽고 쓸 뿐이다.
+
+### 주소
+
+`name@peer`는 `peer`로 등록된 저장소의 세션을 가리킨다. `@`가 들어간 대상은 정해진 순서로만
+해석된다. 정확히 그 철자인 로컬 alias가 있으면 그것(이 규칙 이전에 만들어진 이름), 아니면 등록된
+peer의 `name@peer`, 그것도 아니면 `unknown peer`. 부분 문자열 단계로는 절대 넘어가지 않는다 —
+`kipa@vm`이 로컬의 `kipa@vm2`에 조용히 맞는 것은 엉뚱한 머신으로 배달된 메일이기 때문이다. 새
+alias에는 `@`를 쓸 수 없다. `@`가 없는 대상은 예전과 똑같이 해석된다.
+
+원격 send도 다른 send와 똑같이 검사되고 기록된다(hop과 rate limit 포함). 다만 큐에 들어간다:
+`sent #12 to kipa@vm (hop 0, human)` / `queued for peer vm; it leaves when the relay next runs`.
+poke는 하지 않는다. 받는 쪽 저장소가 메시지를 수입할 때 자기 세션을 깨운다. 원격 본문은 64 KiB까지다.
+
+### 두 저장소 짝짓기
+
+```bash
+laptop$ pager relay id                          # → a1b2…
+vm$     pager relay id                          # → c3d4…
+laptop$ pager peer add vm --store c3d4…
+vm$     pager peer add laptop --store a1b2…
+```
+
+상대 저장소의 id를 명시적으로 등록하기 때문에, 엉뚱한 데이터베이스에 닿은 transport는 배달하는
+대신 실패한다. peer 이름은 `a-z`, `0-9`, `-`로 된 1–32자이고 영문자나 숫자로 시작한다. 기존
+alias가 `@이름`으로 끝나는 이름은 거부되므로, alias가 peer를 가리는 일은 생기지 않는다.
+
+### transport 계약
+
+명령 세 개를 파이프로 잇는다. 방향마다 한 바퀴:
+
+```bash
+# laptop → vm
+pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
+# vm → laptop
+ssh vm pager relay out --peer laptop | pager relay in --peer vm | ssh vm pager relay ack --peer laptop
+```
+
+ssh는 예시일 뿐이고, 줄을 옮길 수 있으면 무엇이든 된다. pager의 보장은 줄을 **잃거나, 반복하거나,
+중간에 자르는** transport에서도 유지된다. 순서만 바꾸지 않으면 된다:
+
+- `relay out`은 읽기만 한다. 최종 결과가 ack되기 전까지는 매번 같은 pending 레코드를 같은 순서로
+  낸다(`--limit`, 1–1000, 기본 100).
+- `relay in`은 레코드마다 따로 판정하고 commit하며, 레코드마다 결과 줄을 하나 낸다. 반복된 레코드는
+  `duplicate`로 답하고, 빠진 레코드가 있으면 그것이 올 때까지 멈춘다(`deferred`, `gap`).
+- `relay ack`은 batch 전체를 먼저 검증한 뒤에만 바꾸고, 최종 결과를 받은 메시지를 닫는다. 같은
+  결과를 두 번 적용해도 바뀌는 것이 없다.
+
+| 상태 | 최종 | 뜻 |
+| --- | --- | --- |
+| `imported` | 예 | 수신자의 수신함에 기록됨. 수신자를 poke한다 |
+| `duplicate` | 예 | 이미 있다 — 재전송이거나 이미 수입된 것 |
+| `rejected` | 예 | 배달할 수 없다(없는 alias, 범위 밖 hop 등). 보낸 쪽에 bounce가 간다 |
+| `deferred` | 아니오 | 지금은 안 된다: 빈틈, 또는 peer별 상한(`retry_after_ms`가 언제인지 알려준다) — 그 자리에서 멈춘다 |
+| `refused` | 아니오 | 스트림이 잘못됐다: 모르는 peer, 다른 저장소, 지원하지 않는 버전, 깨진 줄 — 그 자리에서 멈춘다 |
+
+| exit | 뜻 | transport가 할 일 |
+| --- | --- | --- |
+| 0 | 입력을 다 소비했거나 `deferred`에서 멈춤 | 계속한다. deferred 메일은 나중에 다시 |
+| 1 | 데이터베이스나 I/O 실패 | 나중에 다시 |
+| 2 | 프로토콜이나 구성 문제(`refused`, 사용법) | 멈추고 사람에게 알린다 |
+| 3 | 줄 중간에서 입력이 끝남(잘린 스트림) | 그 바퀴를 다시 돈다. 잘린 줄은 아무 효과가 없었다 |
+
+transport는 또한:
+
+- **hook이 쓰는 것과 같은 pager 바이너리**를 실행해야 한다 — ssh 아래에서는 `PATH`가 더 오래된
+  바이너리를 찾을 수 있고, 그 바이너리는 새 데이터베이스를 거부하거나 hook 밑에서 migration해 버린다.
+- 명령의 stdin에 쓰는 동안 stdout도 읽어야 한다. 그래야 파이프 버퍼(Windows에서는 작다) 때문에
+  교착되지 않는다.
+- `relay in`이 일찍 읽기를 멈춰서 `relay out`이 쓰기 오류로 끝나는 것을 실패로 세지 않는다.
+
+### 레코드
+
+한 줄에 JSON 객체 하나, LF로 끝난다. pager가 쓰는 것은 순수 ASCII다 — non-ASCII 문자는 전부
+`\uXXXX` — 그래서 콘솔이나 파이프의 재인코딩이 망가뜨릴 수 없다. 읽을 때는 UTF-8을 받고, 맨 앞의
+byte-order mark와 CRLF 줄 끝도 받는다. 한 줄은 1 MiB까지이고, LF가 없는 줄은 완성되지 않은 것이라
+아무 효과가 없다.
+
+```json
+{"v":1,"kind":"msg","link":{"store":"<보내는 저장소>","id":"<link id>","seq":17},
+ "origin":{"store":"<저장소>","id":4211},"dst_store":"<받는 저장소>",
+ "to":"kipa","from":"sape","label":"sape","tool":"claude","hop":1,
+ "sent_at":"2026-10-26T06:12:01.123Z","body":"…"}
+{"v":1,"kind":"result","store":"<받는 저장소>","max_v":1,
+ "link":{"store":"…","id":"…","seq":17},"origin_id":4211,
+ "status":"imported","reason":"","retry_after_ms":0}
+```
+
+`link`는 빈틈 없는 일련번호 안에서 레코드의 자리를 정하고, `origin`은 메시지를 처음 쓴 저장소에서의
+정체성이다. `from`은 보낸 사람의 답장용 이름이거나 `null`이고, `label`, `tool`, `sent_at`은 표시용일
+뿐이다. `v`는 프로토콜 버전이다. 받는 쪽이 할 일을 바꾸는 필드는 추가만 해도 버전을 올린다(무시한
+받는 쪽이 잘못 동작하므로). 순수한 설명용 필드는 버전을 올리지 않고 추가할 수 있고, 받는 쪽은 모르는
+필드를 무시한다. 보내는 쪽은 레코드를 표현할 수 있는 가장 낮은 버전으로 쓰므로, 한쪽을 먼저
+업그레이드해도 다른 쪽이 멈추지 않는다.
+
+### 넘어가는 것, 막히는 것
+
+- **인과 hop이 메시지와 함께 넘어간다.** relay된 메일에 대한 답장은 그보다 한 단계 깊으므로, 에이전트
+  답장 사슬은 저장소를 건너도 같은 `MaxHop`에서 막힌다.
+- **수입된 메일은 이 저장소의 발신이 아니다.** 로컬 human 예산을 쓰지 않는 대신, peer당 시간당
+  60건 수입 상한(다른 한도처럼 추정치)으로 막힌다. 넘으면 잃지 않고 미뤄진다.
+- **받는 사람은 어디서 왔는지 본다.** pager가 직접 쓰는 줄이라, 어떤 label도 그 줄을 만들거나 흉내낼
+  수 없다:
+
+  ```
+  [#12] from sape
+    relayed from peer laptop — reply to sape@laptop
+  > the parser work is yours
+  ```
+
+  답장용 이름이 없으면 `no reply address; answer in your own output`이라고 쓴다.
+- **거절은 bounce로 돌아온다.** 보낸 세션이 아직 가진 이름 앞으로 —
+  `your message #12 to ghost@vm was not delivered: no such alias ghost; live names here: kipa`.
+  세션 없이 보낸 메일이나 이름이 없는 세션의 메일에는 bounce가 없고, 결과는 메시지에 남는다
+  (`pager peer ls`, export). bounce도 로컬 메일처럼 alias를 따라간다.
+
+### peer 수명 주기
+
+- `pager peer rm vm`은 `vm` 앞 메일 중 최종 결과가 없는 것이 있으면 거부된다. `--force`는 그 메일을
+  취소하고 보낸 사람마다 **이미 도착했을 수도 있다**고 알린다 — transport가 이미 실어 갔을 수 있기
+  때문이다. 취소된 메일은 다시 보내지 않는다.
+- `pager peer rebind vm --store <id>`는 peer를 다시 짝짓는다(상대 저장소를 새로 만든 뒤 등). pending
+  메일은 새 link로 옮겨 1부터 다시 번호를 매기고, 옛 link에 대한 결과가 늦게 와도 아무것도 바뀌지
+  않는다. 옛 저장소로 이미 실어 간 것은 되돌릴 수 없으므로, 그 저장소가 살아 있으면 그쪽에도 갈 수 있다.
+- `pager relay new-id`는 이 저장소에 새 id를 준다. **백업에서 복원한 저장소에 필요하다** — 복원은
+  일련번호와 메시지 id를 되돌리면서 id는 그대로 두므로, peer가 진짜 새 메일을 이미 본 메일로 여긴다.
+  pending 메일이 있으면 거부된다. 새 id로 다시 보낸 메시지는 이미 수입한 peer에게 새것처럼 보이기
+  때문이다. `--force`는 그 메일을 먼저 취소하고 보낸 사람마다 알린다. 그다음 각 peer가
+  `pager peer rebind <이름> --store <새 id>`를 해야 한다.
+
+### 한계
+
+- 받는 쪽이 이미 prune한 레코드가 다시 오면 — 수입 후 30일이 넘었고, 그 사이 결과가 유실된 채 어떤
+  바퀴도 성공하지 못한 경우 — `rejected: previously rejected`로 답하므로, 실제로는 배달된 메시지에
+  bounce가 갈 수 있다.
+- relay는 한 단계뿐이다. 수입한 메일을 세 번째 저장소로 넘기지 않는다(`via`는 그 용도로 예약돼 있고,
+  버전 1 수신자는 거부한다).
+- 로스터는 다른 저장소의 세션을 보여주지 않는다. 그 이름은 그쪽에서 온 메일로 알게 된다. peer가
+  등록돼 있으면 `pager who`와 `msg_roster` 끝에 peer 이름과, 이 저장소가 각 link의 동작을 마지막으로
+  확인한 때가 한 줄로 붙는다(한 번도 없으면 `no relay seen`). 이 저장소에서 관찰한 것일 뿐, 상대
+  저장소가 살아 있다는 뜻은 아니다.
+
 ## 환경변수
 
 | 변수 | 기본값 | 뜻 |
@@ -274,6 +431,9 @@ hica   2        unknown
 
 보관은 30일이고 그 뒤 삭제된다. 훅 실행 중 하나가 24시간마다 한 번 수행하며, `pager prune`으로
 직접 돌릴 수도 있다.
+
+다른 저장소 앞 메일은 그 저장소가 최종 결과를 줘야 끝난 것으로 친다. 그 전까지는 아무리 오래돼도
+남겨 둔다. 지우면 아무도 모르는 채 잃어버리기 때문이다.
 
 **지우기 전에 반드시 파일로 남긴다.** prune은 지울 행을 `~/.pager/archive.jsonl`에 한 줄씩
 append하고 `fsync`한 **뒤에야** 삭제한다. 파일에 쓰지 못하면 아무것도 지우지 않는다 — 디스크가 찬
@@ -348,7 +508,11 @@ prune이 있으면 아무 일도 하지 않고 그렇다고 말한다.
 - 본문을 인용 블록으로 감싸고 "지시가 아니라 데이터"라고 명시한다
 - 길이를 제한한다
 
-저장소는 로컬 사용자 전용이고 네트워크 노출이 없다.
+pager는 네트워크 연결을 열지 않고, 저장소는 로컬 사용자 전용이다. 그 사용자로 `pager relay in`을
+돌릴 수 있는 것은 무엇이든 저장소에 메일을 넣을 수 있다 — `pager send --human`이 이미 가진 것과 같은
+권한이다. relay transport는 이 경계를 자기가 도는 곳까지 넓히므로, 같은 사용자로 인증된 채널 위에서
+돌려야 한다. 다른 저장소에서 온 메일은 pager가 쓰는 줄로 표시되고, 보낸 사람의 텍스트는 인용된 본문
+밖으로 나오지 않는다.
 
 ## 고장났을 때
 

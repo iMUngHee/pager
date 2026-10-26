@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,5 +233,84 @@ func TestLsShowsRelayedProvenance(t *testing.T) {
 	}
 	if len(provenance) != 1 || provenance[0] != "relayed from peer mac — reply to sape@mac" {
 		t.Errorf("provenance rows = %q, want only the relayed message's:\n%s", provenance, got)
+	}
+}
+
+// round carries one relay round from store `from` (which knows the other as
+// fromPeer) to store `to` (which knows the first as toPeer), the way a
+// transport would: out | in | ack.
+func round(t *testing.T, from, fromPeer, to, toPeer string) {
+	t.Helper()
+	on(t, from)
+	stream := mustRun(t, "relay", "out", "--peer", fromPeer)
+	on(t, to)
+	results, err := capture(t, stream, "relay", "in", "--peer", toPeer)
+	if err != nil {
+		t.Fatalf("relay in: %v", err)
+	}
+	on(t, from)
+	if _, err := capture(t, results, "relay", "ack", "--peer", fromPeer); err != nil {
+		t.Fatalf("relay ack: %v", err)
+	}
+}
+
+// hookTurn runs the recipient's hook the way a person's prompt would, and
+// returns what it injected.
+func hookTurn(t *testing.T, db, session string) string {
+	t.Helper()
+	on(t, db)
+	payload := fmt.Sprintf(`{"session_id":%q,"cwd":%q,"hook_event_name":"UserPromptSubmit","prompt":"go on"}`,
+		session, filepath.Dir(db))
+	out, err := capture(t, payload, "hook", "UserPromptSubmit")
+	if err != nil {
+		t.Fatalf("hook: %v", err)
+	}
+	return out
+}
+
+// TestRelayCarriesHopAcrossStores is the loop guard surviving the relay. Two
+// agents on two machines answer each other with no person in between, each
+// reply sent from the turn that delivered the one before it. The depth climbs
+// one per reply across the stores exactly as it would within one, and the
+// fourth reply is refused — where a relay that imported as --human would have
+// reset the chain at every crossing and let it run on.
+func TestRelayCarriesHopAcrossStores(t *testing.T) {
+	a, b := relayPair(t)
+
+	on(t, a)
+	if got := mustRun(t, "send", "--session", "sa", "kipa@vm", "q0"); !strings.Contains(got, "(hop 0, human)") {
+		t.Fatalf("opening send: %s", got)
+	}
+	round(t, a, "vm", b, "mac")
+
+	injected := hookTurn(t, b, "sb")
+	if !strings.Contains(injected, "relayed from peer mac — reply to sape@mac") {
+		t.Fatalf("the relayed message was not delivered with its provenance:\n%s", injected)
+	}
+	on(t, b)
+	if got := mustRun(t, "send", "--session", "sb", "sape@mac", "r1"); !strings.Contains(got, "(hop 1, caused)") {
+		t.Fatalf("first reply: %s", got)
+	}
+	round(t, b, "mac", a, "vm")
+
+	hookTurn(t, a, "sa")
+	on(t, a)
+	if got := mustRun(t, "send", "--session", "sa", "kipa@vm", "q2"); !strings.Contains(got, "(hop 2, caused)") {
+		t.Fatalf("second reply: %s", got)
+	}
+	round(t, a, "vm", b, "mac")
+
+	hookTurn(t, b, "sb")
+	on(t, b)
+	if got := mustRun(t, "send", "--session", "sb", "sape@mac", "r3"); !strings.Contains(got, "(hop 3, caused)") {
+		t.Fatalf("third reply: %s", got)
+	}
+	round(t, b, "mac", a, "vm")
+
+	hookTurn(t, a, "sa")
+	on(t, a)
+	_, err := capture(t, "", "send", "--session", "sa", "kipa@vm", "q4")
+	if err == nil || !strings.Contains(err.Error(), "causal chain is too deep") {
+		t.Fatalf("fourth reply: err = %v, want the hop limit", err)
 	}
 }
