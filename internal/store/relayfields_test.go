@@ -163,3 +163,30 @@ func TestPruneNeverFinishesOutboundByDelivery(t *testing.T) {
 		t.Error("an outbound row with no relay result was pruned because delivered_at was set")
 	}
 }
+
+// TestPruneNeverFinishesInboundByRelay is the mirror case: a local or imported
+// row is finished by delivery alone, so one that somehow carries relayed_at
+// but was never delivered is kept.
+func TestPruneNeverFinishesInboundByRelay(t *testing.T) {
+	s, fake := newStore(t)
+	t.Setenv("PAGER_ARCHIVE", "off")
+	now := s.Now()
+	res, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO messages(alias, body, hop, origin, created_at, relayed_at)
+		VALUES ('kipa', 'never delivered', 0, 'human', ?, ?)`, now, now)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	fake.Advance(DefaultRetention + time.Hour)
+	if _, err := s.PruneNow(t.Context(), DefaultRetention, false); err != nil {
+		t.Fatalf("PruneNow: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM messages WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Error("an undelivered local row was pruned because relayed_at was set")
+	}
+}

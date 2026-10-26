@@ -79,13 +79,19 @@ func newLineReader(r io.Reader) *lineReader {
 //
 // It returns io.EOF at a clean end, errTruncated when the stream ends inside a
 // line, and errLineTooLong for a line over MaxLine. A byte-order mark is
-// accepted only at the very start of the stream.
+// accepted only at the very start of the stream, and does not count toward the
+// bound. After errLineTooLong the reader is left inside that line and must not
+// be read again; every caller stops the run there.
 func (lr *lineReader) next() ([]byte, error) {
+	limit := MaxLine + 2 // allow for the CRLF itself
+	if !lr.started {
+		limit += 3 // and a leading byte-order mark
+	}
 	var line []byte
 	for {
 		chunk, err := lr.r.ReadSlice('\n')
 		line = append(line, chunk...)
-		if len(line) > MaxLine+2 { // allow for the CRLF itself
+		if len(line) > limit {
 			return nil, errLineTooLong
 		}
 		if err == nil {

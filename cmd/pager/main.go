@@ -287,10 +287,11 @@ func inbox(args []string) error {
 
 func firstLine(body string) string {
 	lines := deliver.BodyLines(body)
+	line := deliver.CleanLine(lines[0]) // a terminal acts on escapes; show them instead
 	if len(lines) > 1 {
-		return lines[0] + " …"
+		return line + " …"
 	}
-	return lines[0]
+	return line
 }
 
 // export writes the whole database to stdout as JSONL.

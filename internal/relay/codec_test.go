@@ -90,4 +90,34 @@ func TestRelayStreamIsASCIIAndRoundTripsKorean(t *testing.T) {
 	if l, err := lr.next(); err != nil || len(l) != MaxLine {
 		t.Errorf("a line exactly at the bound: len %d, err %v", len(l), err)
 	}
+	// The bound is on content: a leading byte-order mark does not use it up.
+	lr = newLineReader(strings.NewReader("\xef\xbb\xbf" + strings.Repeat("x", MaxLine) + "\r\n"))
+	if l, err := lr.next(); err != nil || len(l) != MaxLine {
+		t.Errorf("a BOM-led line exactly at the bound: len %d, err %v", len(l), err)
+	}
+}
+
+// endless is a reader that never ends a line, counting what it handed out.
+type endless struct{ n int }
+
+func (e *endless) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	e.n += len(p)
+	return len(p), nil
+}
+
+// TestLineReaderStopsReadingAtTheBound: a line that never ends is refused
+// once it passes the bound, without the reader consuming — and holding — the
+// rest of the stream first.
+func TestLineReaderStopsReadingAtTheBound(t *testing.T) {
+	src := &endless{}
+	lr := newLineReader(io.LimitReader(src, 64<<20))
+	if _, err := lr.next(); !errors.Is(err, errLineTooLong) {
+		t.Fatalf("an endless line: err = %v, want errLineTooLong", err)
+	}
+	if src.n > MaxLine+2*(64<<10) {
+		t.Errorf("read %d bytes before refusing a line bounded at %d", src.n, MaxLine)
+	}
 }

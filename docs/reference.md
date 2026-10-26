@@ -368,8 +368,9 @@ long as it does not reorder them:
   same pending records in the same order every run (`--limit`, 1–1000, default
   100).
 - `relay in` decides and commits each record on its own and prints one result
-  line per record. A repeated record is answered `duplicate`; a missing one
-  stops the run (`deferred`, `gap`) until it arrives.
+  line per record. A repeated record is answered as the first copy was —
+  `duplicate`, or `rejected: previously rejected` — and a missing one stops the
+  run (`deferred`, `gap`) until it arrives. Blank lines are skipped.
 - `relay ack` validates the whole batch before changing anything, then closes
   each message that got a final result. Applying the same results twice changes
   nothing.
@@ -380,20 +381,20 @@ long as it does not reorder them:
 | `duplicate` | yes | Already here — a resend, or one already imported |
 | `rejected` | yes | Cannot be delivered (no such alias, out-of-range hop, …); the sender gets a bounce |
 | `deferred` | no | Not now: a gap, or the per-peer cap (`retry_after_ms` says when) — the run stops |
-| `refused` | no | The stream is wrong: unknown peer, wrong store, unsupported version, malformed line — the run stops |
+| `refused` | no | The stream is wrong: wrong store, unknown or mismatched link, unsupported version, malformed line — the run stops |
 
 | Exit | Meaning | Transport should |
 | --- | --- | --- |
 | 0 | Input consumed, or stopped on `deferred` | Carry on; retry deferred mail later |
 | 1 | Database or I/O failure | Retry later |
-| 2 | Protocol or configuration problem (`refused`, usage) | Stop and tell a person |
+| 2 | Protocol or configuration problem (`refused`, a `--peer` that is not registered, usage) | Stop and tell a person |
 | 3 | Input ended inside a line (cut stream) | Retry the round; the cut line had no effect |
 
 A transport should also:
 
-- run the **same pager binary the hooks use** — under ssh, `PATH` may find an
-  older one, which refuses the newer database or migrates it underneath the
-  hooks;
+- run the **same pager binary the hooks use** — under ssh, `PATH` may find a
+  different one: an older binary refuses the newer database, a newer one
+  migrates it underneath the hooks;
 - read the commands' stdout while writing their stdin, so a pipe buffer — small
   on Windows — cannot deadlock;
 - not count it as a failure when `relay out` exits with a write error because
@@ -413,13 +414,18 @@ has no effect.
  "to":"kipa","from":"sape","label":"sape","tool":"claude","hop":1,
  "sent_at":"2026-10-26T06:12:01.123Z","body":"…"}
 {"v":1,"kind":"result","store":"<receiver store>","max_v":1,
- "link":{"store":"…","id":"…","seq":17},"origin_id":4211,
- "status":"imported","reason":"","retry_after_ms":0}
+ "link":{"store":"…","id":"…","seq":17},"origin_id":4211,"status":"imported"}
 ```
+
+A result adds `reason` when there is something to say and `retry_after_ms` to
+a `deferred` that has a time to wait for.
 
 `link` places the record in a gap-free sequence; `origin` is the message's
 identity in the store that wrote it. `from` is the sender's reply name, or
-`null`; `label`, `tool` and `sent_at` are display only. `v` is the protocol
+`null`; `label` and `tool` are display only, and `sent_at` is informational —
+the receiver dates the message by its own clock. On a remote send the body is
+limited to 64 KiB, the label to 1 KiB and the name before `@` to 128 bytes, so
+no record can outgrow the line bound and block its link. `v` is the protocol
 version. A field that changes what a receiver must do bumps it even when it is
 only added (a receiver that ignored it would act wrongly); purely descriptive
 fields may be added without a bump, and receivers ignore fields they do not
@@ -447,8 +453,9 @@ upgrading one side first does not stall the other.
 - **A rejection comes back as a bounce** to a name the sending session still
   holds — `your message #12 to ghost@vm was not delivered: no such alias ghost;
   live names here: kipa`. A send with no session, or from a session that holds
-  no name, gets no bounce; the outcome stays on the message (`pager peer ls`,
-  export). A bounce follows its alias like any local mail.
+  no name, gets no bounce; the outcome stays on the message, in the
+  `relay_result` field export shows. A bounce follows its alias like any local
+  mail.
 
 ### Peer lifecycle
 
@@ -618,7 +625,8 @@ account. Anything that can run `pager relay in` as that user can add mail to
 the store — the same authority `pager send --human` already has. A relay
 transport extends the boundary to wherever it runs, so run it as the same user
 and over an authenticated channel. Mail from another store is marked as such
-on a line pager writes, and its sender's text never leaves the quoted body.
+on a line pager writes; beyond the sender's name and reply name, each cleaned
+to one line, its text stays inside the quoted body.
 
 ## When it breaks
 

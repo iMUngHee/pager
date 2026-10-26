@@ -222,3 +222,32 @@ func TestSendRefusesAddressOffItsPeer(t *testing.T) {
 		t.Errorf("%d rows written", n)
 	}
 }
+
+// TestSendRefusesOversizedRemoteLabelOrName: every field a relay record
+// carries is bounded when the message is sent, so no record can outgrow the
+// reader's line bound and block its link for good. Local mail is unaffected.
+func TestSendRefusesOversizedRemoteLabelOrName(t *testing.T) {
+	st, _ := newStore(t)
+	mustAddPeer(t, st, "vm")
+	if _, err := Send(t.Context(), st, SendRequest{
+		Alias: "kipa@vm", Peer: "vm", Body: "x", Label: strings.Repeat("l", MaxRelayLabel+1), Human: true,
+	}); err == nil {
+		t.Error("an oversized label was accepted for another store")
+	}
+	if _, err := Send(t.Context(), st, SendRequest{
+		Alias: strings.Repeat("n", MaxRelayName+1) + "@vm", Peer: "vm", Body: "x", Human: true,
+	}); err == nil {
+		t.Error("an oversized name was accepted for another store")
+	}
+	if got := outSeq(t, st, "vm"); got != 0 {
+		t.Errorf("out_seq = %d after refused sends, want 0", got)
+	}
+	if _, err := Send(t.Context(), st, SendRequest{
+		Alias: strings.Repeat("n", MaxRelayName) + "@vm", Peer: "vm", Body: "x", Label: strings.Repeat("l", MaxRelayLabel), Human: true,
+	}); err != nil {
+		t.Errorf("label and name exactly at their limits: %v", err)
+	}
+	if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa", Body: "x", Label: strings.Repeat("l", MaxRelayLabel+1), Human: true}); err != nil {
+		t.Errorf("a long label on local mail: %v", err)
+	}
+}

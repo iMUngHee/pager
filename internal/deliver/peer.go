@@ -288,21 +288,11 @@ func RebindPeer(ctx context.Context, st *store.Store, name, storeID string) (Pee
 // twice. Cancel it first: `pager relay new-id --force` does that, telling each
 // sender.
 func RotateStoreID(ctx context.Context, st *store.Store) (string, error) {
-	id, err := newLinkID() // same shape and source as a store id
-	if err != nil {
-		return "", err
-	}
-	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
-		var pending int
-		if err := c.QueryRowContext(ctx,
-			"SELECT count(*) FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL").Scan(&pending); err != nil {
-			return fmt.Errorf("read pending mail: %w", err)
-		}
-		if pending > 0 {
-			return fmt.Errorf("%w: %d message(s) to peers have no final result; "+
-				"relay them first, or use --force to cancel them", ErrPeerHasPendingMail, pending)
-		}
-		return RelinkAll(ctx, c, id)
+	var id string
+	err := st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		var err error
+		id, err = RelinkAll(ctx, c)
+		return err
 	})
 	if err != nil {
 		return "", err
@@ -310,45 +300,60 @@ func RotateStoreID(ctx context.Context, st *store.Store) (string, error) {
 	return id, nil
 }
 
-// RelinkAll replaces this store's id with id and gives every peer a fresh link
-// with nothing on it. It runs on the caller's write transaction, which must
-// already have closed every outbound row that had no final result.
-func RelinkAll(ctx context.Context, c *sql.Conn, id string) error {
-	if !validStoreID(id) {
-		return fmt.Errorf("store id %q is not 32 hex digits", id)
+// RelinkAll gives this store a new id and every peer a fresh link with nothing
+// on it, on the caller's write transaction, and returns the new id.
+//
+// It refuses while any outbound row has no final result, rather than trusting
+// its caller to have closed them: a row left open would be re-sent under the
+// new id and look new to a peer that already imported it. That refusal is
+// RotateStoreID's whole answer to pending mail; ForceRotateStoreID closes the
+// rows first in the same transaction.
+func RelinkAll(ctx context.Context, c *sql.Conn) (string, error) {
+	var pending int
+	if err := c.QueryRowContext(ctx,
+		"SELECT count(*) FROM messages WHERE dst_peer IS NOT NULL AND relayed_at IS NULL").Scan(&pending); err != nil {
+		return "", fmt.Errorf("read pending mail: %w", err)
+	}
+	if pending > 0 {
+		return "", fmt.Errorf("%w: %d message(s) to peers have no final result; "+
+			"relay them first, or use --force to cancel them", ErrPeerHasPendingMail, pending)
+	}
+	id, err := newLinkID() // a store id has the same shape and source
+	if err != nil {
+		return "", err
 	}
 	if _, err := c.ExecContext(ctx,
 		"UPDATE store_identity SET id = ? WHERE singleton = 1", id); err != nil {
-		return fmt.Errorf("replace store id: %w", err)
+		return "", fmt.Errorf("replace store id: %w", err)
 	}
 	rows, err := c.QueryContext(ctx, "SELECT name FROM peers ORDER BY name")
 	if err != nil {
-		return fmt.Errorf("read peers: %w", err)
+		return "", fmt.Errorf("read peers: %w", err)
 	}
 	var names []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
 			rows.Close()
-			return err
+			return "", err
 		}
 		names = append(names, n)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return "", err
 	}
 	for _, name := range names {
 		link, err := newLinkID()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if _, err := c.ExecContext(ctx,
 			"UPDATE peers SET link_id = ?, out_seq = 0 WHERE name = ?", link, name); err != nil {
-			return fmt.Errorf("re-link peer %q: %w", name, err)
+			return "", fmt.Errorf("re-link peer %q: %w", name, err)
 		}
 	}
-	return nil
+	return id, nil
 }
 
 // moveToLink renumbers the peer's mail that has no final result onto link,

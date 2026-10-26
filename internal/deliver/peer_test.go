@@ -249,3 +249,24 @@ func TestRosterPeerFooter(t *testing.T) {
 		t.Errorf("footer\n got %q\nwant %q", got, want)
 	}
 }
+
+// TestRebindRefusals: a rebind needs a registered peer and another store's
+// well-formed id, and a refused rebind changes nothing.
+func TestRebindRefusals(t *testing.T) {
+	st, _ := newStore(t)
+	own, _ := st.ID(t.Context())
+	before := mustAddPeer(t, st, "vm")
+	for _, tc := range []struct{ name, store string }{
+		{"vm", own},
+		{"vm", "not-an-id"},
+		{"nope", otherStore},
+	} {
+		if _, err := RebindPeer(t.Context(), st, tc.name, tc.store); err == nil {
+			t.Errorf("RebindPeer(%q, %q) succeeded", tc.name, tc.store)
+		}
+	}
+	peers, err := ListPeers(t.Context(), st)
+	if err != nil || len(peers) != 1 || peers[0].LinkID != before.LinkID || peers[0].StoreID != before.StoreID {
+		t.Errorf("peers after refused rebinds = %+v, %v; want vm unchanged", peers, err)
+	}
+}

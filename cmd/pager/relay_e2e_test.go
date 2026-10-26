@@ -325,9 +325,96 @@ func TestFirstLineStopsAtAnyLineBreak(t *testing.T) {
 		{"one\rtwo", "one …"},
 		{"one\r\ntwo", "one …"},
 		{"one\u2028two", "one …"},
+		{"esc\x1bEforged", `esc\u001bEforged`},
+		{"csi\x1b[2K\x1b[1Gforged", `csi\u001b[2K\u001b[1Gforged`},
+		{"bs\b\b\bxx", `bs\u0008\u0008\u0008xx`},
+		{"c1\u009b2K", `c1\u009b2K`},
 	} {
 		if got := firstLine(tc.in); got != tc.want {
 			t.Errorf("firstLine(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestSendPrintsTheStoredMessageOnALateFailure: when a lookup after the write
+// fails, the CLI still prints what it sent, then the error — so the person
+// does not send it again.
+func TestSendPrintsTheStoredMessageOnALateFailure(t *testing.T) {
+	_, b := relayPair(t)
+	on(t, b)
+	st, err := store.Open(t.Context(), b, clock.System{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := st.DB().ExecContext(t.Context(), "ALTER TABLE sessions RENAME TO sessions_gone"); err != nil {
+		t.Fatalf("break the presence lookup: %v", err)
+	}
+	st.Close()
+	out, err := capture(t, "", "send", "--human", "kipa", "hello")
+	if err == nil {
+		t.Fatal("send succeeded although the presence lookup could not run")
+	}
+	if !strings.Contains(out, "sent #1 to kipa (hop 0, human)") {
+		t.Errorf("stdout = %q, want the stored message reported", out)
+	}
+}
+
+// TestWhoListsPeers: with peers registered, pager who ends with the line that
+// names them.
+func TestWhoListsPeers(t *testing.T) {
+	a, _ := relayPair(t)
+	on(t, a)
+	got := mustRun(t, "who")
+	if !strings.Contains(got, "\npeers: vm (no relay seen) — address their sessions as name@peer") {
+		t.Errorf("pager who lacks the peer line:\n%s", got)
+	}
+}
+
+// TestRelayCommandsRefuseFlagsTheyDoNotTake: each relay subcommand takes only
+// its own flags, and an unknown subcommand is refused before any store opens.
+func TestRelayCommandsRefuseFlagsTheyDoNotTake(t *testing.T) {
+	a, _ := relayPair(t)
+	on(t, a)
+	for _, args := range [][]string{
+		{"relay", "out", "--peer", "vm", "--force"},
+		{"relay", "id", "--peer", "vm"},
+		{"relay", "in", "--peer", "vm", "--limit", "5"},
+		{"relay", "new-id", "--peer", "vm"},
+		{"relay", "bogus", "--peer", "vm"},
+	} {
+		if _, err := capture(t, "", args...); exitOf(err) != 2 {
+			t.Errorf("pager %s: exit %d (%v), want 2", strings.Join(args, " "), exitOf(err), err)
+		}
+	}
+}
+
+// TestPeerCommandsThroughTheCLI drives peer ls, rm, rm --force, rebind and
+// relay new-id the way a person would.
+func TestPeerCommandsThroughTheCLI(t *testing.T) {
+	a, b := relayPair(t)
+	on(t, b)
+	idB := strings.TrimSpace(mustRun(t, "relay", "id"))
+	on(t, a)
+	mustRun(t, "send", "--session", "sa", "kipa@vm", "pending")
+
+	if got := mustRun(t, "peer", "ls"); !strings.Contains(got, "vm") || !strings.Contains(got, idB) {
+		t.Errorf("peer ls:\n%s", got)
+	}
+	if _, err := capture(t, "", "peer", "rm", "vm"); err == nil {
+		t.Error("peer rm with pending mail succeeded")
+	}
+	if _, err := capture(t, "", "relay", "new-id"); err == nil {
+		t.Error("relay new-id with pending mail succeeded")
+	}
+	if got := mustRun(t, "peer", "rebind", "vm", "--store", idB); !strings.Contains(got, "1 pending message(s) renumbered") {
+		t.Errorf("peer rebind: %s", got)
+	}
+	mustRun(t, "relay", "new-id", "--force")
+	if got := mustRun(t, "relay", "out", "--peer", "vm"); got != "" {
+		t.Errorf("relay out after new-id --force: %q", got)
+	}
+	mustRun(t, "peer", "rm", "vm")
+	if got := mustRun(t, "peer", "ls"); !strings.Contains(got, "no peers") {
+		t.Errorf("peer ls after rm:\n%s", got)
 	}
 }

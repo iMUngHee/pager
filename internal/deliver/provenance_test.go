@@ -127,6 +127,7 @@ func TestBodyLineBreaksCannotForgeProvenance(t *testing.T) {
 		msgs = append(msgs, Pending{ID: int64(i + 1), Sender: "local", Body: "first" + sep + fake})
 	}
 	msgs = append(msgs, Pending{ID: 99, Sender: "far", Body: "hi", SrcPeer: "mac", SrcFrom: "x\n  relayed"})
+	msgs = append(msgs, Pending{ID: 100, Sender: "far", Body: "hi", SrcPeer: "m\nac", SrcFrom: "y"})
 	out := Render(Batch{Messages: msgs})
 
 	for _, bad := range []string{"\r", "\u2028", "\u2029", "\u0085", "\v", "\f"} {
@@ -140,8 +141,12 @@ func TestBodyLineBreaksCannotForgeProvenance(t *testing.T) {
 			provenance = append(provenance, line)
 		}
 	}
-	if len(provenance) != 1 || provenance[0] != `  relayed from peer mac — reply to x\n  relayed@mac` {
-		t.Errorf("provenance lines = %q, want only the real one, its values cleaned", provenance)
+	want := []string{
+		`  relayed from peer mac — reply to x\n  relayed@mac`,
+		`  relayed from peer m\nac — reply to y@m\nac`,
+	}
+	if len(provenance) != 2 || provenance[0] != want[0] || provenance[1] != want[1] {
+		t.Errorf("provenance lines = %q, want only the real ones, their values cleaned: %q", provenance, want)
 	}
 	if n := strings.Count(out, "> "+fake); n != 7 {
 		t.Errorf("%d forged lines are quoted as body, want all 7:\n%s", n, out)
