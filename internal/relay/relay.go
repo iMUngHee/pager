@@ -70,6 +70,9 @@ const (
 // maxFrom bounds a reply address taken from another store.
 const maxFrom = 128
 
+// maxTool bounds the sender's host name, which is display text in the poke.
+const maxTool = 16
+
 // maxLiveNames bounds the alias names a "no such alias" rejection lists.
 const maxLiveNames = 10
 
@@ -259,8 +262,15 @@ func Out(ctx context.Context, st *store.Store, peer string, limit int, w io.Writ
 				if len(from) <= maxFrom {
 					r.rec.From = &from
 				}
-				if r.rec.Tool, err = sessionTool(ctx, c, r.sender); err != nil {
+				tool, err := sessionTool(ctx, c, r.sender)
+				if err != nil {
 					return fmt.Errorf("read sender tool: %w", err)
+				}
+				// Bounded like every other field, so no record can outgrow
+				// the reader's line bound: a host name longer than the
+				// receiver keeps is not sent.
+				if len(tool) <= maxTool {
+					r.rec.Tool = tool
 				}
 			}
 			records = append(records, r.rec)
@@ -610,7 +620,7 @@ func normalizeFrom(from *string) any {
 // normalizeTool keeps a host name only when it looks like one; it is display
 // text in the poke and nothing else.
 func normalizeTool(tool string) string {
-	if tool == "" || len(tool) > 16 {
+	if tool == "" || len(tool) > maxTool {
 		return ""
 	}
 	for _, r := range tool {

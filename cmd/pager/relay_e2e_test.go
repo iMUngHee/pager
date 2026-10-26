@@ -329,6 +329,7 @@ func TestFirstLineStopsAtAnyLineBreak(t *testing.T) {
 		{"csi\x1b[2K\x1b[1Gforged", `csi\u001b[2K\u001b[1Gforged`},
 		{"bs\b\b\bxx", `bs\u0008\u0008\u0008xx`},
 		{"c1\u009b2K", `c1\u009b2K`},
+		{strings.Repeat("long ", 40), strings.Repeat("long ", 40)}, // escaped, never cut short
 	} {
 		if got := firstLine(tc.in); got != tc.want {
 			t.Errorf("firstLine(%q) = %q, want %q", tc.in, got, tc.want)
@@ -380,6 +381,7 @@ func TestRelayCommandsRefuseFlagsTheyDoNotTake(t *testing.T) {
 		{"relay", "id", "--peer", "vm"},
 		{"relay", "in", "--peer", "vm", "--limit", "5"},
 		{"relay", "new-id", "--peer", "vm"},
+		{"relay", "ack", "--peer", "vm", "--limit", "5"},
 		{"relay", "bogus", "--peer", "vm"},
 	} {
 		if _, err := capture(t, "", args...); exitOf(err) != 2 {
