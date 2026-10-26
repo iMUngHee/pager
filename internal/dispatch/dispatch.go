@@ -47,6 +47,11 @@ func (r Result) Head() string {
 
 // Send resolves req.Target, writes the message and reports on it.
 //
+// Once the message is stored, a failure in the steps that only report on it —
+// who is behind the name, the poke — is returned together with the Result, so
+// a caller can still say what was sent: res.Sent.ID is non-zero exactly when
+// the message exists. Dropping that would invite a retry that sends it twice.
+//
 // The target is resolved before anything is written, so an unknown or
 // ambiguous name fails with the candidates rather than queueing mail nobody
 // will read. A remote address is never poked: the recipient is in another
@@ -107,7 +112,7 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	}
 	presence, err := deliver.PresenceOf(ctx, st, found, probe)
 	if err != nil {
-		return Result{}, err
+		return res, err
 	}
 	if line := presence.Note(found.Alias); line != "" {
 		res.Lines = append(res.Lines, line)
@@ -119,7 +124,7 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	// runs, which is why wake reports an outcome instead of returning an error.
 	tool, err := deliver.SenderTool(ctx, st, req.Sender)
 	if err != nil {
-		return Result{}, err
+		return res, err
 	}
 	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool)), found.Alias); line != "" {
 		res.Lines = append(res.Lines, line)

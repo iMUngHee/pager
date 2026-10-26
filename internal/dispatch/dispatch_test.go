@@ -158,3 +158,24 @@ func TestRemoteSendNeverPokes(t *testing.T) {
 		t.Errorf("remote head = %q", got)
 	}
 }
+
+// TestSendReportsTheMessageWhenLaterLookupsFail: once a message is stored, a
+// failure in the steps that only report on it still hands back what was sent,
+// so neither front end leaves the sender thinking nothing happened — which is
+// what invites a retry that sends it twice. The sessions table is taken away
+// after setup so the presence lookup, which runs after the write, fails.
+func TestSendReportsTheMessageWhenLaterLookupsFail(t *testing.T) {
+	st := newStore(t)
+	named(t, st, "s-kipa", "kipa", "")
+	if _, err := st.DB().ExecContext(t.Context(), "ALTER TABLE sessions RENAME TO sessions_gone"); err != nil {
+		t.Fatalf("break the presence lookup: %v", err)
+	}
+
+	res, err := Send(t.Context(), st, Request{Target: "kipa", Body: "x", Human: true, Probe: alive})
+	if err == nil {
+		t.Fatal("Send succeeded although the presence lookup could not run")
+	}
+	if res.Sent.ID == 0 || res.Head() != "sent #1 to kipa (hop 0, human)" {
+		t.Errorf("result after a late failure = %+v (head %q); want the stored message", res, res.Head())
+	}
+}
