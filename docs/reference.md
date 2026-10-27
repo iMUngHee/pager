@@ -465,6 +465,11 @@ record, so upgrading one side first does not stall the other.
 
 ### Peer lifecycle
 
+- `pager peer ls` shows each peer's `NAME`, the `STORE` id it was enrolled
+  with, `PENDING` — mail to it that has no final result yet — and `SEQ`, the
+  last sequence number used on the current link. `SEQ` is not a count of mail
+  sent: `peer add`, `peer rebind` and `relay new-id` each start a new link, and
+  a rebind numbers the pending mail on it from 1.
 - `pager peer rm vm` is refused while mail to `vm` has no final result.
   `--force` cancels that mail and tells each sender it **may still arrive** — a
   transport may already have carried it. Cancelled mail is never sent again.
