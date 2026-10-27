@@ -426,7 +426,7 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 		case rec.V > Version:
 			return answer(StatusRefused, fmt.Sprintf("unsupported version %d (this store reads up to %d)", rec.V, Version))
 		case rec.Kind != kindMsg:
-			return answer(StatusRefused, "unsupported kind "+rec.Kind)
+			return answer(StatusRefused, "unsupported kind "+deliver.CleanReason(rec.Kind))
 		// Both reasons name the id the record carries: after a `relay new-id`
 		// on the sender, its link store is the id to rebind to.
 		case rec.DstStore != own:
@@ -449,10 +449,10 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 			return fmt.Errorf("read link: %w", err)
 		}
 		if known && (linkPeer != peer || linkSrc != rec.Link.Store || linkDst != rec.DstStore) {
-			return answer(StatusRefused, "link mismatch: link "+rec.Link.ID+" belongs to another pairing")
+			return answer(StatusRefused, "link mismatch: link "+deliver.CleanReason(rec.Link.ID)+" belongs to another pairing")
 		}
 		if !known && rec.Link.Seq != 1 {
-			return answer(StatusRefused, fmt.Sprintf("unknown link %s starting at %d, not 1", rec.Link.ID, rec.Link.Seq))
+			return answer(StatusRefused, fmt.Sprintf("unknown link %s starting at %d, not 1", deliver.CleanReason(rec.Link.ID), rec.Link.Seq))
 		}
 
 		originOK := rec.Origin.Store == rec.Link.Store && rec.Origin.ID > 0
@@ -550,7 +550,7 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 			target = ""
 		}
 		if target == "" {
-			names, err := liveNames(ctx, c, now)
+			names, err := deliver.LiveNames(ctx, c, now-store.DefaultStale.Milliseconds(), maxLiveNames)
 			if err != nil {
 				return err
 			}
@@ -577,28 +577,6 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 		return answer(StatusImported, "")
 	})
 	return res, to, stop, err
-}
-
-// liveNames lists, by name, aliases whose session ran a hook recently — the
-// names a sender on the other side could have meant.
-func liveNames(ctx context.Context, c *sql.Conn, now int64) ([]string, error) {
-	rows, err := c.QueryContext(ctx, `
-		SELECT a.alias FROM aliases a JOIN sessions s ON s.session_id = a.session_id
-		 WHERE s.heartbeat_at >= ? AND instr(a.alias, '@') = 0
-		 ORDER BY a.alias LIMIT ?`, now-store.DefaultStale.Milliseconds(), maxLiveNames)
-	if err != nil {
-		return nil, fmt.Errorf("list live names: %w", err)
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		names = append(names, n)
-	}
-	return names, rows.Err()
 }
 
 // normalizeFrom keeps a reply address only when it could be one: 1–128 bytes
@@ -696,7 +674,7 @@ func Ack(ctx context.Context, st *store.Store, peer string, in io.Reader, diag i
 			case r.V < 1 || r.V > Version:
 				return exitf(2, "refused: unsupported result version %d", r.V)
 			case r.Store != p.storeID:
-				return exitf(2, "refused: results come from store %s, but %s is enrolled as %s", r.Store, name, p.storeID)
+				return exitf(2, "refused: results come from store %s, but %s is enrolled as %s", deliver.CleanReason(r.Store), name, p.storeID)
 			}
 		}
 
