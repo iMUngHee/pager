@@ -446,3 +446,33 @@ func PrimaryAlias(ctx context.Context, st *store.Store, session string) (string,
 	}
 	return alias, nil
 }
+
+// LiveNames lists the names a sender on another store could have meant: for
+// each session that ran a hook at or after since, the one name it is best known
+// by, in name order and at most limit of them. A session holding an automatic
+// name and a chosen one is offered once. Legacy names holding '@' are left
+// out — quoted in a bounce, one would read as an address on another store.
+func LiveNames(ctx context.Context, c *sql.Conn, since int64, limit int) ([]string, error) {
+	rows, err := c.QueryContext(ctx, `
+		SELECT name FROM (
+		  SELECT (SELECT a.alias FROM aliases a
+		           WHERE a.session_id = s.session_id AND instr(a.alias, '@') = 0
+		           `+primaryAliasOrder+` LIMIT 1) AS name
+		    FROM sessions s
+		   WHERE s.heartbeat_at >= ?)
+		 WHERE name IS NOT NULL
+		 ORDER BY name LIMIT ?`, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list live names: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}

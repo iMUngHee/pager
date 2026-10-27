@@ -222,6 +222,7 @@ func TestRelayInDecisionTable(t *testing.T) {
 		{name: "version negative", rec: next(func(r *Record) { r.V = -1 }), status: StatusRefused, reason: "malformed", seqAfter: 1, exit: 2},
 		{name: "version above max", rec: next(func(r *Record) { r.V = Version + 1 }), status: StatusRefused, reason: "unsupported version", seqAfter: 1, exit: 2},
 		{name: "reserved kind", rec: next(func(r *Record) { r.Kind = "roster" }), status: StatusRefused, reason: "unsupported kind", seqAfter: 1, exit: 2},
+		{name: "kind with a control character", rec: next(func(r *Record) { r.Kind = "\x1b[31mred" }), status: StatusRefused, reason: `unsupported kind \u001b[31mred`, seqAfter: 1, exit: 2},
 		{name: "link store not enrolled", rec: next(func(r *Record) { r.Link.Store = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store: the record comes from store " + strings.Repeat("e", 32), seqAfter: 1, exit: 2},
 		{name: "dst store is not this one", rec: next(func(r *Record) { r.DstStore = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store: the record is for store " + strings.Repeat("e", 32), seqAfter: 1, exit: 2},
 		// The reason quotes the incoming id, so it is cleaned; and with both
@@ -240,6 +241,19 @@ func TestRelayInDecisionTable(t *testing.T) {
 			peer: "mac2", rec: next(nil), status: StatusRefused, reason: "link mismatch", seqAfter: 1, exit: 2,
 		},
 		{name: "unknown link not starting at 1", rec: next(func(r *Record) { r.Link.ID = "link-M" }), status: StatusRefused, reason: "unknown link", seqAfter: 1, exit: 2},
+		{name: "unknown link id with a control character", rec: next(func(r *Record) { r.Link.ID = "\x1b[2Jlink-M" }), status: StatusRefused, reason: `unknown link \u001b[2Jlink-M starting at 2`, seqAfter: 1, exit: 2},
+		{
+			name: "known link id with a control character, other pairing",
+			prep: func(t *testing.T, a, b node) {
+				if _, err := b.st.DB().ExecContext(t.Context(), `
+					INSERT INTO peer_links(link_id, peer, src_store, dst_store, in_seq) VALUES (?, 'mac', ?, ?, 1)`,
+					"\x1b[2Jlink-X", strings.Repeat("e", 32), b.id); err != nil {
+					t.Fatalf("seed link: %v", err)
+				}
+			},
+			rec:    next(func(r *Record) { r.Link.ID = "\x1b[2Jlink-X" }),
+			status: StatusRefused, reason: `link mismatch: link \u001b[2Jlink-X belongs`, seqAfter: 1, exit: 2,
+		},
 		{
 			name: "known link from a store mac was rebound away from",
 			prep: func(t *testing.T, a, b node) {
@@ -560,10 +574,15 @@ func TestRelayAckRejectsWholeBatchOnStoreMismatch(t *testing.T) {
 	rs, _ := in(t, b, "mac", out(t, a))
 
 	forged := rs[1]
-	forged.Store = strings.Repeat("e", 32)
+	forged.Store = "\x1b[2J" + strings.Repeat("e", 32)
 	batch := append(encode(t, rs[0]), encode(t, forged)...)
-	if code := ack(t, a, batch); code != 2 {
-		t.Errorf("exit = %d, want 2", code)
+	err := Ack(t.Context(), a.st, "vm", bytes.NewReader(batch), io.Discard)
+	if code := exitCode(t, err); code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	// The refusal reaches a terminal on stderr, so the id it quotes is cleaned.
+	if msg := err.Error(); strings.Contains(msg, "\x1b") || !strings.Contains(msg, `from store \u001b[2J`) {
+		t.Errorf("refusal %q does not escape the store id it quotes", msg)
 	}
 	if n := count(t, a, "SELECT count(*) FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NOT NULL"); n != 0 {
 		t.Errorf("%d rows acked from a refused batch", n)
@@ -574,6 +593,45 @@ func TestRelayAckRejectsWholeBatchOnStoreMismatch(t *testing.T) {
 	}
 	if n := count(t, a, "SELECT count(*) FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NOT NULL"); n != 2 {
 		t.Errorf("%d rows acked from an honest batch, want 2", n)
+	}
+}
+
+// TestRejectionNamesEachLiveSessionOnce: the names a "no such alias" rejection
+// offers are one per live session, the one it is best known by, so a session
+// holding an automatic name and a chosen one is not listed twice, and a
+// session that has gone quiet is not offered at all. A name holding '@' cannot
+// be addressed from another store, so it is never offered, and a session whose
+// newest name is one is offered by the next.
+func TestRejectionNamesEachLiveSessionOnce(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "s-sape", "sape")
+	session(t, b, "s-gone", "aaa")
+	b.fake.Advance(store.DefaultStale + time.Minute)
+
+	// s-1 was recorded first and sorts first, but its name sorts last.
+	session(t, b, "s-1", "zulu")
+	session(t, b, "s-2", "kipa")
+	if ok, err := deliver.SetAlias(t.Context(), b.st, "maba", "s-2"); err != nil || !ok {
+		t.Fatalf("second name: %v %v", ok, err)
+	}
+	// Names from before '@' was refused: s-2's newest, and the only one s-3
+	// holds, which leaves s-3 live with nothing to offer.
+	session(t, b, "s-3", "")
+	for _, l := range []struct{ alias, session string }{{"maba@old", "s-2"}, {"only@at", "s-3"}} {
+		if _, err := b.st.DB().ExecContext(t.Context(), `
+			INSERT INTO aliases(alias, session_id, root, tool, updated_at) VALUES (?, ?, '/tmp/ws', 'claude', ?)`,
+			l.alias, l.session, b.st.Now()+1000); err != nil {
+			t.Fatalf("legacy name %s: %v", l.alias, err)
+		}
+	}
+	// Live means within the stale window, not "at this very instant".
+	b.fake.Advance(time.Minute)
+
+	sendRemote(t, a, "s-sape", "ghost", "hello")
+	rs, code := in(t, b, "mac", out(t, a))
+	want := "no such alias ghost; live names here: maba, zulu"
+	if code != 0 || len(rs) != 1 || rs[0].Status != StatusRejected || rs[0].Reason != want {
+		t.Fatalf("results = %+v exit %d, want one rejected with reason %q", rs, code, want)
 	}
 }
 
