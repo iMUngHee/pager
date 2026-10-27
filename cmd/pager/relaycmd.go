@@ -60,8 +60,11 @@ func peerCmd(args []string) error {
 			fmt.Println("no peers — register one with: pager peer add <name> --store <id>")
 			return nil
 		}
+		// SEQ, not SENT: out_seq belongs to the current link and starts over
+		// when a rebind or new-id mints another, and a lifetime count could not
+		// be had anyway once prune has taken the rows that made it up.
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tSTORE\tPENDING\tSENT")
+		fmt.Fprintln(tw, "NAME\tSTORE\tPENDING\tSEQ")
 		for _, p := range peers {
 			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\n", p.Name, p.StoreID, p.Pending, p.OutSeq)
 		}

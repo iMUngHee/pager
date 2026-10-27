@@ -385,6 +385,10 @@ byte-order mark와 CRLF 줄 끝도 받는다. 한 줄은 1 MiB까지이고, LF�
 
 ### peer 수명 주기
 
+- `pager peer ls`는 peer마다 `NAME`, 등록할 때 쓴 저장소 id인 `STORE`, 최종 결과를 아직 받지 못한
+  그 peer 앞 메일 수인 `PENDING`, 지금 link에서 마지막으로 쓴 일련번호인 `SEQ`를 보여준다. `SEQ`는
+  보낸 메일 수가 아니다. `peer add`, `peer rebind`, `relay new-id`는 저마다 새 link를 시작하고,
+  rebind는 pending 메일에 그 link에서 1부터 번호를 매긴다.
 - `pager peer rm vm`은 `vm` 앞 메일 중 최종 결과가 없는 것이 있으면 거부된다. `--force`는 그 메일을
   취소하고 보낸 사람마다 **그래도 도착할 수 있다**고 알린다 — transport가 이미 실어 갔을 수 있기
   때문이다. 취소된 메일은 다시 보내지 않는다.

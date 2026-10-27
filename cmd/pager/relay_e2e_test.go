@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -397,10 +398,28 @@ func TestPeerCommandsThroughTheCLI(t *testing.T) {
 	on(t, b)
 	idB := strings.TrimSpace(mustRun(t, "relay", "id"))
 	on(t, a)
+	mustRun(t, "send", "--session", "sa", "kipa@vm", "carried")
+	round(t, a, "vm", b, "mac")
 	mustRun(t, "send", "--session", "sa", "kipa@vm", "pending")
 
-	if got := mustRun(t, "peer", "ls"); !strings.Contains(got, "vm") || !strings.Contains(got, idB) {
-		t.Errorf("peer ls:\n%s", got)
+	// peerLs returns the header and the one peer row of peer ls, as fields.
+	peerLs := func(when string) (head, row []string) {
+		t.Helper()
+		lines := nonEmptyLines(mustRun(t, "peer", "ls"))
+		if len(lines) != 2 {
+			t.Fatalf("peer ls %s:\n%s", when, strings.Join(lines, "\n"))
+		}
+		return strings.Fields(lines[0]), strings.Fields(lines[1])
+	}
+	// SEQ is the current link's counter, not a count of mail ever sent: one
+	// message carried and one pending make it 2, and it starts over with the
+	// link.
+	head, row := peerLs("after a round")
+	if want := []string{"NAME", "STORE", "PENDING", "SEQ"}; !slices.Equal(head, want) {
+		t.Errorf("peer ls header = %v, want %v", head, want)
+	}
+	if want := []string{"vm", idB, "1", "2"}; !slices.Equal(row, want) {
+		t.Errorf("peer ls row = %v, want %v", row, want)
 	}
 	if _, err := capture(t, "", "peer", "rm", "vm"); err == nil {
 		t.Error("peer rm with pending mail succeeded")
@@ -411,9 +430,15 @@ func TestPeerCommandsThroughTheCLI(t *testing.T) {
 	if got := mustRun(t, "peer", "rebind", "vm", "--store", idB); !strings.Contains(got, "1 pending message(s) renumbered") {
 		t.Errorf("peer rebind: %s", got)
 	}
+	if _, row := peerLs("after rebind"); !slices.Equal(row, []string{"vm", idB, "1", "1"}) {
+		t.Errorf("peer ls row after rebind = %v, want SEQ back at the one pending message", row)
+	}
 	mustRun(t, "relay", "new-id", "--force")
 	if got := mustRun(t, "relay", "out", "--peer", "vm"); got != "" {
 		t.Errorf("relay out after new-id --force: %q", got)
+	}
+	if _, row := peerLs("after new-id --force"); !slices.Equal(row, []string{"vm", idB, "0", "0"}) {
+		t.Errorf("peer ls row after new-id --force = %v, want an empty fresh link", row)
 	}
 	mustRun(t, "peer", "rm", "vm")
 	if got := mustRun(t, "peer", "ls"); !strings.Contains(got, "no peers") {
