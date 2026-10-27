@@ -109,13 +109,13 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			return Sent{}, fmt.Errorf("send: %q is not an address on peer %q", req.Alias, req.Peer)
 		}
 		if len(req.Body) > MaxRelayBody {
-			return Sent{}, fmt.Errorf("%w: %d bytes, the limit for another store is %d", ErrBodyTooLarge, len(req.Body), MaxRelayBody)
+			return Sent{}, fmt.Errorf("send: %w: %d bytes, the limit for another store is %d", ErrBodyTooLarge, len(req.Body), MaxRelayBody)
 		}
 		if len(req.Label) > MaxRelayLabel {
-			return Sent{}, fmt.Errorf("send: label is %d bytes, the limit for another store is %d", len(req.Label), MaxRelayLabel)
+			return Sent{}, fmt.Errorf("send: label is too large to relay: %d bytes, the limit for another store is %d", len(req.Label), MaxRelayLabel)
 		}
 		if name := strings.TrimSuffix(req.Alias, "@"+req.Peer); len(name) > MaxRelayName {
-			return Sent{}, fmt.Errorf("send: name %d bytes long before @%s, the limit is %d", len(name), req.Peer, MaxRelayName)
+			return Sent{}, fmt.Errorf("send: name before @%s is too large to relay: %d bytes, the limit for another store is %d", req.Peer, len(name), MaxRelayName)
 		}
 	}
 
