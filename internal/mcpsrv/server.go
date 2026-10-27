@@ -219,11 +219,15 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	for _, m := range messages {
 		// Lines after a body's first are prefixed so that no body text can
 		// stand where pager's own provenance line goes; the label is one line
-		// by construction.
-		body := strings.Join(deliver.BodyLines(m.Body), "\n> ")
-		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), deliver.SanitizeLabel(m.Sender), m.Alias, body)
+		// by construction. The provenance line sits directly under the line
+		// that names the sender, as in hook delivery, however long the body.
+		lines := deliver.BodyLines(m.Body)
+		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), deliver.SanitizeLabel(m.Sender), m.Alias, lines[0])
 		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
 			sb.WriteString("  " + line + "\n")
+		}
+		for _, line := range lines[1:] {
+			sb.WriteString("> " + line + "\n")
 		}
 	}
 	// A failed stamp must not cost the caller its mail: it already has the

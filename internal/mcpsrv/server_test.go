@@ -726,6 +726,35 @@ func TestListMarksEveryBodyLineBreak(t *testing.T) {
 	}
 }
 
+// TestListPutsProvenanceUnderTheSender: msg_list writes the provenance line
+// right under the line that names the sender, before a body's continuation
+// lines, the order hook delivery uses. A one-line body renders as before.
+func TestListPutsProvenanceUnderTheSender(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "me", "my-box")
+	t.Setenv("PAGER_SESSION", "me")
+	if _, err := st.DB().ExecContext(t.Context(), `
+		INSERT INTO messages(alias, sender_label, body, hop, origin, created_at, src_peer, src_store, src_id, src_from)
+		VALUES ('my-box', 'sape', ?, 1, 'human', ?, 'mac', '0123456789abcdef0123456789abcdef', 1, 'sape'),
+		       ('my-box', 'kipa', 'only line', 1, 'human', ?, 'mac', '0123456789abcdef0123456789abcdef', 2, 'kipa')`,
+		"first\nsecond\nthird", st.Now(), st.Now()); err != nil {
+		t.Fatalf("seed relayed rows: %v", err)
+	}
+
+	s := start(t, st)
+	resp := s.call(2, "tools/call", map[string]any{"name": "msg_list", "arguments": map[string]any{}})
+	if isError(t, resp) {
+		t.Fatalf("msg_list failed: %s", text(t, resp))
+	}
+	got := text(t, resp)
+	if want := " sape -> my-box: first\n  relayed from peer mac — reply to sape@mac\n> second\n> third\n"; !strings.Contains(got, want) {
+		t.Errorf("multi-line relayed message, want %q in:\n%s", want, got)
+	}
+	if want := " kipa -> my-box: only line\n  relayed from peer mac — reply to kipa@mac\n"; !strings.Contains(got, want) {
+		t.Errorf("one-line relayed message, want %q in:\n%s", want, got)
+	}
+}
+
 // TestSendSaysItIsStoredOnALateFailure: when a lookup after the write fails,
 // msg_send's error still says the message was sent, so the agent does not
 // send it again.
