@@ -420,3 +420,38 @@ func TestPeerCommandsThroughTheCLI(t *testing.T) {
 		t.Errorf("peer ls after rm:\n%s", got)
 	}
 }
+
+// TestPeerAndRelayExitTwoOnlyForUsage pins the rule the reference states
+// beside the transport's exit table: outside relay out, in and ack, a usage
+// mistake exits 2 and a refusal exits 1, whatever flags were given.
+func TestPeerAndRelayExitTwoOnlyForUsage(t *testing.T) {
+	a, b := relayPair(t)
+	on(t, b)
+	idB := strings.TrimSpace(mustRun(t, "relay", "id"))
+	on(t, a)
+	mustRun(t, "send", "--session", "sa", "kipa@vm", "pending")
+
+	for _, c := range []struct {
+		args []string
+		exit int
+	}{
+		// An undeclared flag is a parse error only before the first
+		// positional; past it, it would count as a second name.
+		{[]string{"peer", "add", "--bogus", "vm2", "--store", idB}, 2},
+		{[]string{"peer", "rebind", "--bogus", "vm", "--store", idB}, 2},
+		{[]string{"peer", "rm", "--bogus", "vm"}, 2},
+		{[]string{"peer", "rm", "vm", "--bogus"}, 2},
+		{[]string{"peer", "rm"}, 2},
+		{[]string{"peer", "bogus"}, 2},
+		{[]string{"relay", "new-id", "--bogus"}, 2},
+		{[]string{"peer", "add", "v_m", "--store", idB}, 1},
+		{[]string{"peer", "rm", "nosuch"}, 1},
+		{[]string{"peer", "rm", "--force", "nosuch"}, 1},
+		{[]string{"peer", "rm", "vm"}, 1},
+		{[]string{"relay", "new-id"}, 1},
+	} {
+		if _, err := capture(t, "", c.args...); exitOf(err) != c.exit {
+			t.Errorf("pager %s: exit %d (%v), want %d", strings.Join(c.args, " "), exitOf(err), err, c.exit)
+		}
+	}
+}

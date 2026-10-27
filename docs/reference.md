@@ -345,9 +345,10 @@ vm$     pager peer add laptop --store a1b2…
 
 Enrolling the other store's id explicitly is what makes a transport that lands
 on the wrong database fail instead of delivering there. Peer names are 1–32
-characters of `a-z`, `0-9` and `-`, starting with a letter or digit. A name an
-existing alias already ends with as `@name` is refused, so it can never be
-shadowed.
+characters of `a-z`, `0-9` and `-`, starting with a letter or digit; upper case
+is folded to lower case wherever pager takes one, so `VM` is the peer `vm`. A
+name an existing alias already ends with as `@name` is refused, so it can never
+be shadowed.
 
 ### The transport contract
 
@@ -390,6 +391,10 @@ long as it does not reorder them:
 | 2 | Protocol or configuration problem (`refused`, a `--peer` that is not registered, usage) | Stop and tell a person |
 | 3 | Input ended inside a line (cut stream) | Retry the round; the cut line had no effect |
 
+These codes belong to `relay out`, `relay in` and `relay ack`. The other `peer`
+and `relay` commands exit 2 only for a usage mistake; a refusal such as
+`relay new-id` with mail still waiting exits 1.
+
 A transport should also:
 
 - run the **same pager binary the hooks use** — under ssh, `PATH` may find a
@@ -425,13 +430,13 @@ identity in the store that wrote it. `from` is the sender's reply name, or
 `null`; `label` and `tool` are display only, and `sent_at` is informational —
 the receiver dates the message by its own clock. On a remote send the body is
 limited to 64 KiB, the label to 1 KiB and the name before `@` to 128 bytes, and
-`relay out` leaves out a reply name or host name longer than the receiver keeps,
-so no record can outgrow the line bound and block its link. `v` is the protocol
-version. A field that changes what a receiver must do bumps it even when it is
-only added (a receiver that ignored it would act wrongly); purely descriptive
-fields may be added without a bump, and receivers ignore fields they do not
-know. A sender writes the lowest version that can express a record, so
-upgrading one side first does not stall the other.
+`relay out` leaves out a reply name (`from`) or host name (`tool`) longer than
+the receiver keeps, so no record can outgrow the line bound and block its link.
+`v` is the protocol version. A field that changes what a receiver must do bumps
+it even when it is only added (a receiver that ignored it would act wrongly);
+purely descriptive fields may be added without a bump, and receivers ignore
+fields they do not know. A sender writes the lowest version that can express a
+record, so upgrading one side first does not stall the other.
 
 ### What crosses, and what is capped
 

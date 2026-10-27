@@ -26,7 +26,7 @@ func peerCmd(args []string) error {
 		fs := flag.NewFlagSet("peer add", flag.ContinueOnError)
 		storeID := fs.String("store", "", "the other store's id, from `pager relay id` there")
 		if err := fs.Parse(permute(fs, args[1:])); err != nil {
-			return err
+			return usageError(err.Error())
 		}
 		if fs.NArg() != 1 || *storeID == "" {
 			return usageError("usage: pager peer add <name> --store <id>")
@@ -71,7 +71,7 @@ func peerCmd(args []string) error {
 		fs := flag.NewFlagSet("peer rebind", flag.ContinueOnError)
 		storeID := fs.String("store", "", "the store id to pair with now, from `pager relay id` there")
 		if err := fs.Parse(permute(fs, args[1:])); err != nil {
-			return err
+			return usageError(err.Error())
 		}
 		if fs.NArg() != 1 || *storeID == "" {
 			return usageError("usage: pager peer rebind <name> --store <id>")
@@ -92,7 +92,7 @@ func peerCmd(args []string) error {
 		fs := flag.NewFlagSet("peer rm", flag.ContinueOnError)
 		force := fs.Bool("force", false, "cancel mail still waiting for this peer, telling each sender")
 		if err := fs.Parse(permute(fs, args[1:])); err != nil {
-			return err
+			return usageError(err.Error())
 		}
 		if fs.NArg() != 1 {
 			return usageError("usage: pager peer rm <name> [--force]")
