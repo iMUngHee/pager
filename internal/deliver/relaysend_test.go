@@ -251,3 +251,29 @@ func TestSendRefusesOversizedRemoteLabelOrName(t *testing.T) {
 		t.Errorf("a long label on local mail: %v", err)
 	}
 }
+
+// TestRemoteSendLimitsReadAlike: the three send-time limits on mail for another
+// store refuse in one shape — what is too large, its size, the limit — so a
+// reader who has met one recognises the others.
+func TestRemoteSendLimitsReadAlike(t *testing.T) {
+	st, _ := newStore(t)
+	mustAddPeer(t, st, "vm")
+	for _, tc := range []struct {
+		name string
+		req  SendRequest
+		want string
+	}{
+		{"body", SendRequest{Alias: "kipa@vm", Peer: "vm", Body: strings.Repeat("x", MaxRelayBody+1), Human: true},
+			"send: message body is too large to relay: 65537 bytes, the limit for another store is 65536"},
+		{"label", SendRequest{Alias: "kipa@vm", Peer: "vm", Body: "x", Label: strings.Repeat("l", MaxRelayLabel+1), Human: true},
+			"send: label is too large to relay: 1025 bytes, the limit for another store is 1024"},
+		{"name", SendRequest{Alias: strings.Repeat("n", MaxRelayName+1) + "@vm", Peer: "vm", Body: "x", Human: true},
+			"send: name before @vm is too large to relay: 129 bytes, the limit for another store is 128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Send(t.Context(), st, tc.req); err == nil || err.Error() != tc.want {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
