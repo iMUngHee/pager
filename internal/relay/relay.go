@@ -427,8 +427,12 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 			return answer(StatusRefused, fmt.Sprintf("unsupported version %d (this store reads up to %d)", rec.V, Version))
 		case rec.Kind != kindMsg:
 			return answer(StatusRefused, "unsupported kind "+rec.Kind)
-		case rec.Link.Store != p.storeID || rec.DstStore != own:
-			return answer(StatusRefused, "wrong store: this is "+own+", enrolled for peer "+peer+" is "+p.storeID)
+		// Both reasons name the id the record carries: after a `relay new-id`
+		// on the sender, its link store is the id to rebind to.
+		case rec.DstStore != own:
+			return answer(StatusRefused, "wrong store: the record is for store "+deliver.CleanReason(rec.DstStore)+", and this is "+own)
+		case rec.Link.Store != p.storeID:
+			return answer(StatusRefused, "wrong store: the record comes from store "+deliver.CleanReason(rec.Link.Store)+", but peer "+peer+" is enrolled as "+p.storeID)
 		case rec.Link.ID == "" || rec.Link.Seq < 1:
 			return answer(StatusRefused, "malformed link")
 		}
@@ -807,6 +811,12 @@ func ForceRemovePeer(ctx context.Context, st *store.Store, peer string, diag io.
 	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
 		bounced, cancelled = bounced[:0], 0
 		if _, err := readPeer(ctx, c, name); err != nil {
+			// An unknown peer is a person's mistake here, not a transport's,
+			// so it exits 1 as plain peer rm does.
+			var ee *ExitError
+			if errors.As(err, &ee) {
+				return ee.Err
+			}
 			return err
 		}
 		rows, err := c.QueryContext(ctx,

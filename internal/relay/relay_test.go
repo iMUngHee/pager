@@ -222,8 +222,12 @@ func TestRelayInDecisionTable(t *testing.T) {
 		{name: "version negative", rec: next(func(r *Record) { r.V = -1 }), status: StatusRefused, reason: "malformed", seqAfter: 1, exit: 2},
 		{name: "version above max", rec: next(func(r *Record) { r.V = Version + 1 }), status: StatusRefused, reason: "unsupported version", seqAfter: 1, exit: 2},
 		{name: "reserved kind", rec: next(func(r *Record) { r.Kind = "roster" }), status: StatusRefused, reason: "unsupported kind", seqAfter: 1, exit: 2},
-		{name: "link store not enrolled", rec: next(func(r *Record) { r.Link.Store = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store", seqAfter: 1, exit: 2},
-		{name: "dst store is not this one", rec: next(func(r *Record) { r.DstStore = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store", seqAfter: 1, exit: 2},
+		{name: "link store not enrolled", rec: next(func(r *Record) { r.Link.Store = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store: the record comes from store " + strings.Repeat("e", 32), seqAfter: 1, exit: 2},
+		{name: "dst store is not this one", rec: next(func(r *Record) { r.DstStore = strings.Repeat("e", 32) }), status: StatusRefused, reason: "wrong store: the record is for store " + strings.Repeat("e", 32), seqAfter: 1, exit: 2},
+		// The reason quotes the incoming id, so it is cleaned; and with both
+		// stores wrong, the record's addressee is what the reason names.
+		{name: "both stores wrong", rec: next(func(r *Record) { r.Link.Store, r.DstStore = strings.Repeat("e", 32), "\x1b[2J"+strings.Repeat("f", 32) }), status: StatusRefused, reason: `wrong store: the record is for store \u001b[2J` + strings.Repeat("f", 32) + ", and this is ", seqAfter: 1, exit: 2},
+		{name: "link store with a control character", rec: next(func(r *Record) { r.Link.Store = "\x1b[2J" + strings.Repeat("e", 32) }), status: StatusRefused, reason: `wrong store: the record comes from store \u001b[2J` + strings.Repeat("e", 32) + ", but peer", seqAfter: 1, exit: 2},
 		{name: "empty link id", rec: next(func(r *Record) { r.Link.ID = "" }), status: StatusRefused, reason: "malformed link", seqAfter: 1, exit: 2},
 		{name: "zero seq", rec: next(func(r *Record) { r.Link.Seq = 0 }), status: StatusRefused, reason: "malformed link", seqAfter: 1, exit: 2},
 		{
@@ -942,6 +946,9 @@ func TestNewIDStartsFreshLinks(t *testing.T) {
 	rs, code := in(t, b, "mac", stream)
 	if code != 2 || len(rs) != 1 || !strings.Contains(rs[0].Reason, "wrong store") {
 		t.Fatalf("before re-enrolment: %+v exit %d, want refused(wrong store)", rs, code)
+	}
+	if !strings.Contains(rs[0].Reason, "from store "+id) {
+		t.Errorf("reason %q does not name the new id %s to rebind to", rs[0].Reason, id)
 	}
 
 	if _, err := deliver.RebindPeer(t.Context(), b.st, "mac", id); err != nil {
