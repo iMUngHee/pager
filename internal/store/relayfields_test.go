@@ -75,8 +75,15 @@ func TestExportCarriesRelayFields(t *testing.T) {
 
 	// A row written by a store that predates relaying, then migrated.
 	path := openAtVersion(t, 3)
-	if _, err := Open(t.Context(), path, clock.NewFake(testBase)); err != nil {
+	// The first open migrates and is closed again, as a process would exit;
+	// a store left open keeps the file busy, and Windows then cannot remove
+	// the test's directory.
+	seed, err := Open(t.Context(), path, clock.NewFake(testBase))
+	if err != nil {
 		t.Fatalf("seed open: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
 	}
 	old, err := Open(t.Context(), path, clock.NewFake(testBase))
 	if err != nil {
