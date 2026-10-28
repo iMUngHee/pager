@@ -65,7 +65,7 @@ func TestPokeWindowsNamedPipe(t *testing.T) {
 		if auth.Type != "auth" || auth.Token != "test-token" {
 			t.Fatalf("unexpected auth: %+v", auth)
 		}
-		if message.Type != "user" || message.Priority != "now" || message.Message.Role != "user" || message.Message.Content != "test-body" {
+		if message.Type != "user" || message.Priority != "next" || message.Message.Role != "user" || message.Message.Content != "test-body" {
 			t.Fatalf("unexpected message: %+v", message)
 		}
 	case <-ctx.Done():

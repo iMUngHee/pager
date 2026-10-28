@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,9 +87,11 @@ func registrySnapshot(t *testing.T) map[string]bool {
 	return seen
 }
 
-// waitForInbox blocks until a session that was not there before registers a
-// messaging socket, and returns its session id.
-func waitForInbox(t *testing.T, before map[string]bool) string {
+// waitForInbox blocks until the session the test started — pid — registers a
+// messaging socket, and returns its session id. Matching the pid, not just a
+// record that is new, keeps a real session started meanwhile from being the
+// one the test pokes.
+func waitForInbox(t *testing.T, before map[string]bool, pid int) string {
 	t.Helper()
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".claude", "sessions")
@@ -101,7 +104,7 @@ func waitForInbox(t *testing.T, before map[string]bool) string {
 					continue
 				}
 				rec, err := readClaudeRecord(filepath.Join(dir, e.Name()))
-				if err == nil && rec.MessagingSocketPath != "" && rec.SessionID != "" {
+				if err == nil && rec.Pid == pid && rec.MessagingSocketPath != "" && rec.SessionID != "" {
 					return rec.SessionID
 				}
 			}
@@ -186,7 +189,7 @@ func TestLiveClaudeWake(t *testing.T) {
 		}
 	}()
 
-	target := waitForInbox(t, before)
+	target := waitForInbox(t, before, cmd.Process.Pid)
 	time.Sleep(2 * time.Second) // let it settle into idle
 
 	ctx := context.Background()
@@ -237,6 +240,104 @@ func TestLiveClaudeWake(t *testing.T) {
 
 	if after := causalEpoch(t, st, target); after != epochBefore {
 		t.Errorf("causal_epoch %d -> %d; a poke must not end the recipient's exchange", epochBefore, after)
+	}
+}
+
+// TestLiveClaudePokeLeavesABusyTurnAlone pokes a session in the middle of a
+// turn. The poke must wait for that turn instead of cutting it off: measured
+// on 2.1.312, a frame with priority "now" ended the turn below after its first
+// line with no stop reason, so a person watching saw their session interrupted
+// and a running loop stop.
+func TestLiveClaudePokeLeavesABusyTurnAlone(t *testing.T) {
+	bin := buildPager(t)
+	settings := writeSettings(t, bin)
+	dbPath := filepath.Join(t.TempDir(), "msg.db")
+
+	before := registrySnapshot(t)
+	cmd := exec.Command("claude", "-p",
+		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--include-partial-messages", "--model", "haiku", "--allowedTools", "",
+		"--settings", settings, "--setting-sources", "")
+	cmd.Env = append(os.Environ(), "CLAUDE_CODE_HARBOR_KITE=1", "PAGER_DB="+dbPath)
+	cmd.Dir = t.TempDir()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start claude: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	lines := make(chan string, 4096)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
+		for scanner.Scan() {
+			lines <- scanner.Text()
+		}
+		close(lines)
+	}()
+
+	target := waitForInbox(t, before, cmd.Process.Pid)
+	time.Sleep(2 * time.Second) // let it settle into idle
+
+	// A turn long enough to still be running when the poke lands.
+	prompt := `{"type":"user","message":{"role":"user","content":"Count from 1 to 300, one number per line, nothing else."}}`
+	if _, err := stdin.Write([]byte(prompt + "\n")); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	started := time.After(60 * time.Second)
+	for running := false; !running; {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatal("the session exited before its turn started")
+			}
+			running = strings.Contains(l, `"type":"stream_event"`) && strings.Contains(l, "text_delta")
+		case <-started:
+			t.Fatal("the turn never started producing text")
+		}
+	}
+
+	got := Wake(context.Background(), target, PokeBody("livetarget", "livetest", ""))
+	if got.Outcome != Woken {
+		t.Fatalf("Wake() = %q via %q (%v), want %q", got.Outcome, got.Via, got.Err, Woken)
+	}
+
+	// The first result to come back belongs to the turn that was running.
+	ended := time.After(90 * time.Second)
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatal("the session exited before the running turn ended")
+			}
+			var r struct {
+				Type       string  `json:"type"`
+				StopReason *string `json:"stop_reason"`
+			}
+			if json.Unmarshal([]byte(l), &r) != nil || r.Type != "result" {
+				continue
+			}
+			reason := "none"
+			if r.StopReason != nil {
+				reason = *r.StopReason
+			}
+			if reason != "end_turn" {
+				t.Errorf("the running turn ended with stop_reason %q; a poke must not interrupt it", reason)
+			}
+			return
+		case <-ended:
+			t.Fatal("the running turn never ended")
+		}
 	}
 }
 

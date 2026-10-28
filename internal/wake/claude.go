@@ -250,16 +250,19 @@ func (c *claudeWaker) peerToken(sess *claudeSession) (string, error) {
 // auth line must come first; anything else on an unauthenticated connection is
 // dropped.
 //
-// `priority` is the host's own field, not something pager invented for it.
-// Read out of the 2.1.241 binary, it is declared `optional()` over
-// ["now","next","later"] roughly 2KB from `crossSessionInbound` — the same
-// module as the rest of this protocol. "now" is what a poke means: the point
-// of waking a session is that it stops waiting for its next turn.
+// `priority` is the host's own field, not something pager invented for it. It
+// is declared `optional()` over ["now","next","later"], and what the values do
+// was read out of the 2.1.312 binary. A queued "now" makes the host abort the
+// turn in progress (`_abortOnNowPriorityCommand`), so a poke sent with it cut
+// a busy recipient off mid-turn: its user saw the turn as interrupted, and a
+// running loop stopped. The host's own message to another session goes out as
+// "next", and none of its frames carries "now". Measured with "next", a turn
+// in progress runs to its end and the poke is taken after it; an idle session
+// still wakes. A poke is that kind of message, so it uses the same value.
 //
-// What the host does with the value is unmeasured, and this code does not
-// depend on the answer. The field being optional is the only property that
-// matters — a host that ignores it, or one that drops it in a later version,
-// leaves the poke exactly as effective as it would be without the field.
+// The field being optional is still the only property the poke depends on —
+// a host that ignores it, or drops it in a later version, leaves the poke as
+// effective as it would be without the field.
 func claudeFrame(token, body string) ([]byte, error) {
 	auth, err := json.Marshal(map[string]string{"type": "auth", "token": token})
 	if err != nil {
@@ -267,7 +270,7 @@ func claudeFrame(token, body string) ([]byte, error) {
 	}
 	user, err := json.Marshal(map[string]any{
 		"type":     "user",
-		"priority": "now",
+		"priority": "next",
 		"message":  map[string]string{"role": "user", "content": body},
 	})
 	if err != nil {

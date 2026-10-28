@@ -245,12 +245,12 @@ func TestPokeAuthenticatesThenSends(t *testing.T) {
 	}
 }
 
-// TestClaudeFrameCarriesPriorityNow pins a field that nothing else here would
-// miss. The plan wrote the frame down as measured and this field was not in
-// it, so it reached the wire with no record of where it came from — see
-// claudeFrame for that record. Pinning it makes dropping or renaming it a
+// TestClaudeFramePriorityDoesNotInterrupt pins a field that nothing else here
+// would miss. "now" makes the host abort the recipient's turn in progress, so
+// a poke must go out as "next", the value the host uses for its own messages
+// to another session — see claudeFrame. Pinning it makes changing the value a
 // decision rather than a diff nobody reads.
-func TestClaudeFrameCarriesPriorityNow(t *testing.T) {
+func TestClaudeFramePriorityDoesNotInterrupt(t *testing.T) {
 	frame, err := claudeFrame("tok", "body")
 	if err != nil {
 		t.Fatalf("claudeFrame: %v", err)
@@ -267,8 +267,8 @@ func TestClaudeFrameCarriesPriorityNow(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &user); err != nil {
 		t.Fatalf("message line is not JSON: %v", err)
 	}
-	if user.Priority != "now" {
-		t.Errorf("priority = %q, want \"now\" — the host declares the field over [\"now\",\"next\",\"later\"]", user.Priority)
+	if user.Priority != "next" {
+		t.Errorf("priority = %q, want \"next\" — \"now\" interrupts a busy recipient's turn", user.Priority)
 	}
 }
 
