@@ -338,9 +338,10 @@ transport는 또한:
 ### 레코드
 
 한 줄에 JSON 객체 하나, LF로 끝난다. pager가 쓰는 것은 순수 ASCII다 — non-ASCII 문자는 전부
-`\uXXXX` — 그래서 콘솔이나 파이프의 재인코딩이 망가뜨릴 수 없다. 읽을 때는 UTF-8을 받고, 맨 앞의
-byte-order mark와 CRLF 줄 끝도 받는다. 한 줄은 1 MiB까지이고, LF가 없는 줄은 완성되지 않은 것이라
-아무 효과가 없다.
+`\uXXXX` — 그래서 콘솔이나 파이프의 재인코딩이 망가뜨릴 수 없다. 읽을 때는 UTF-8과 CRLF 줄 끝을
+받고, 맨 앞의 byte-order mark는 4개까지 건너뛴다(Windows PowerShell 5.1은 2개를 쓴다). 한 줄은
+1 MiB까지이고, LF가 없는 줄은 완성되지 않은 것이라 아무 효과가 없다. 그 mark만 있는 스트림은 잘린
+것이 아니라 빈 스트림이다.
 
 ```json
 {"v":1,"kind":"msg","link":{"store":"<보내는 저장소>","id":"<link id>","seq":17},

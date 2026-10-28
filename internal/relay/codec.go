@@ -15,7 +15,7 @@ import (
 // pipe, a file, a Windows console that re-encodes text between programs. So
 // what pager writes is pure ASCII — every non-ASCII character escaped as
 // \uXXXX — and what it reads may be anything a reasonable writer produces:
-// UTF-8, a byte-order mark at the start, CRLF line endings.
+// UTF-8, byte-order marks at the start, CRLF line endings.
 
 // MaxLine bounds one line of the stream, terminator excluded. MaxRelayBody is
 // sized so that a body escaped at six bytes per byte still fits.
@@ -65,6 +65,25 @@ func escapeNonASCII(b []byte) []byte {
 	return out
 }
 
+// byteOrderMark is UTF-8's. A reader skips a run of up to maxLeadingMarks of
+// them at the very start of the stream: Windows PowerShell 5.1 hands the next
+// stage of a pipeline two. The cap keeps a writer gone wrong from being read
+// past without end; a mark beyond it is data, which the record decoder then
+// refuses as malformed.
+const (
+	byteOrderMark   = "\xef\xbb\xbf"
+	maxLeadingMarks = 4
+)
+
+// trimLeadingMarks drops up to maxLeadingMarks byte-order marks from the
+// front of b.
+func trimLeadingMarks(b []byte) []byte {
+	for i := 0; i < maxLeadingMarks && bytes.HasPrefix(b, []byte(byteOrderMark)); i++ {
+		b = b[len(byteOrderMark):]
+	}
+	return b
+}
+
 // lineReader yields the complete lines of a stream.
 type lineReader struct {
 	r       *bufio.Reader
@@ -78,14 +97,17 @@ func newLineReader(r io.Reader) *lineReader {
 // next returns the next complete line without its LF or CRLF.
 //
 // It returns io.EOF at a clean end, errTruncated when the stream ends inside a
-// line, and errLineTooLong for a line over MaxLine. A byte-order mark is
-// accepted only at the very start of the stream, and does not count toward the
-// bound. After errLineTooLong the reader is left inside that line and must not
-// be read again; every caller stops the run there.
+// line, and errLineTooLong for a line over MaxLine. Byte-order marks are
+// skipped only at the very start of the stream, up to maxLeadingMarks, and do
+// not count toward the bound. A stream that is those marks and nothing else is
+// a clean end, not a cut line: a writer may put them out even when it has
+// nothing to write, and calling that truncated would ask for a resend of
+// nothing every round. After errLineTooLong the reader is left inside that line
+// and must not be read again; every caller stops the run there.
 func (lr *lineReader) next() ([]byte, error) {
 	limit := MaxLine + 2 // allow for the CRLF itself
 	if !lr.started {
-		limit += 3 // and a leading byte-order mark
+		limit += maxLeadingMarks * len(byteOrderMark) // and the leading marks
 	}
 	var line []byte
 	for {
@@ -101,6 +123,9 @@ func (lr *lineReader) next() ([]byte, error) {
 			continue
 		}
 		if errors.Is(err, io.EOF) {
+			if !lr.started {
+				line = trimLeadingMarks(line)
+			}
 			if len(line) == 0 {
 				return nil, io.EOF
 			}
@@ -111,7 +136,7 @@ func (lr *lineReader) next() ([]byte, error) {
 
 	if !lr.started {
 		lr.started = true
-		line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
+		line = trimLeadingMarks(line)
 	}
 	line = bytes.TrimSuffix(line, []byte("\n"))
 	line = bytes.TrimSuffix(line, []byte("\r"))

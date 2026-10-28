@@ -97,6 +97,53 @@ func TestRelayStreamIsASCIIAndRoundTripsKorean(t *testing.T) {
 	}
 }
 
+// TestLineReaderSkipsLeadingMarks: Windows PowerShell 5.1 hands the next stage
+// of a pipeline two byte-order marks, so a run of up to four at the very start
+// is skipped. A stream of nothing but those marks carries no record and ends
+// cleanly: calling it cut would ask the transport to resend nothing, round
+// after round. Around them every stream keeps its meaning.
+func TestLineReaderSkipsLeadingMarks(t *testing.T) {
+	const mark = "\xef\xbb\xbf"
+	for _, tc := range []struct {
+		name  string
+		in    string
+		lines []string
+		end   error
+	}{
+		{"one mark alone", mark, nil, io.EOF},
+		{"two marks alone", mark + mark, nil, io.EOF},
+		{"four marks alone", strings.Repeat(mark, 4), nil, io.EOF},
+		{"two marks then a record", mark + mark + `{"v":1}` + "\r\n", []string{`{"v":1}`}, io.EOF},
+		// A fifth is past the cap, so it is data and stays on the line.
+		{"five marks then a line", strings.Repeat(mark, 5) + "{}\n", []string{mark + "{}"}, io.EOF},
+		{"five marks alone", strings.Repeat(mark, 5), nil, errTruncated},
+		{"part of a mark", "\xef\xbb", nil, errTruncated},
+		{"marks then a cut line", mark + mark + "{", nil, errTruncated},
+		// Past the start a mark is data, so a lone one there is an
+		// unterminated line like any other.
+		{"a mark after the first line", "{}\n" + mark, []string{"{}"}, errTruncated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lr := newLineReader(strings.NewReader(tc.in))
+			for _, want := range tc.lines {
+				if l, err := lr.next(); err != nil || string(l) != want {
+					t.Fatalf("line = %q, %v; want %q", l, err, want)
+				}
+			}
+			if l, err := lr.next(); !errors.Is(err, tc.end) {
+				t.Errorf("end: line %q, err = %v, want %v", l, err, tc.end)
+			}
+		})
+	}
+
+	// The marks do not use up the bound: four of them ahead of a line exactly
+	// at it still fit.
+	lr := newLineReader(strings.NewReader(strings.Repeat(mark, 4) + strings.Repeat("x", MaxLine) + "\r\n"))
+	if l, err := lr.next(); err != nil || len(l) != MaxLine {
+		t.Errorf("four marks ahead of a line at the bound: len %d, err %v", len(l), err)
+	}
+}
+
 // endless is a reader that never ends a line, counting what it handed out.
 type endless struct{ n int }
 

@@ -409,9 +409,10 @@ A transport should also:
 
 One JSON object per line, LF-terminated. pager writes pure ASCII — every
 non-ASCII character as `\uXXXX` — so no console or pipe re-encoding can corrupt
-it, and it reads UTF-8 with an optional leading byte-order mark and CRLF line
-endings. A line may be at most 1 MiB; a line without its LF is incomplete and
-has no effect.
+it, and it reads UTF-8 with CRLF line endings and skips up to four byte-order
+marks at the very start (Windows PowerShell 5.1 writes two). A line may be at
+most 1 MiB; a line without its LF is incomplete and has no effect. A stream that
+holds only those marks is empty, not cut.
 
 ```json
 {"v":1,"kind":"msg","link":{"store":"<sender store>","id":"<link id>","seq":17},

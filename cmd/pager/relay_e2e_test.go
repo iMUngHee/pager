@@ -147,6 +147,53 @@ func TestRelayAckTruncatedTailExitsThree(t *testing.T) {
 	}
 }
 
+// TestRelayInAndAckSkipLeadingMarks: Windows PowerShell 5.1 hands the next
+// stage two byte-order marks ahead of the stream, with CRLF line endings. Both
+// commands read through them, and a stream of nothing but marks — what an idle
+// round there produces — ends cleanly. Exit 3 for it would have the transport
+// resend a stream that never held a record, every idle round.
+func TestRelayInAndAckSkipLeadingMarks(t *testing.T) {
+	const mark = "\xef\xbb\xbf"
+	crlf := func(s string) string { return strings.ReplaceAll(s, "\n", "\r\n") }
+	pending := "SELECT count(*) FROM messages WHERE dst_peer = 'vm' AND relayed_at IS NULL"
+	a, b := relayPair(t)
+	on(t, a)
+	mustRun(t, "send", "--session", "sa", "kipa@vm", "through two marks")
+	stream := mustRun(t, "relay", "out", "--peer", "vm")
+
+	on(t, b)
+	for _, empty := range []string{mark, mark + mark} {
+		results, err := capture(t, empty, "relay", "in", "--peer", "mac")
+		if code := exitOf(err); code != 0 || results != "" {
+			t.Errorf("relay in on %d mark(s) alone: exit %d (%v), results %q; want exit 0 and none",
+				len(empty)/len(mark), code, err, results)
+		}
+	}
+	results, err := capture(t, mark+mark+crlf(stream), "relay", "in", "--peer", "mac")
+	if err != nil {
+		t.Fatalf("relay in after two marks: %v", err)
+	}
+	if got := nonEmptyLines(results); len(got) != 1 || !strings.Contains(got[0], `"status":"imported"`) {
+		t.Fatalf("results = %q, want one imported", got)
+	}
+
+	on(t, a)
+	for _, empty := range []string{mark, mark + mark} {
+		if _, err := capture(t, empty, "relay", "ack", "--peer", "vm"); exitOf(err) != 0 {
+			t.Errorf("relay ack on %d mark(s) alone: exit %d (%v), want 0", len(empty)/len(mark), exitOf(err), err)
+		}
+	}
+	if n := countRows(t, a, pending); n != 1 {
+		t.Fatalf("%d messages pending after empty acks, want the 1 still waiting", n)
+	}
+	if _, err := capture(t, mark+mark+crlf(results), "relay", "ack", "--peer", "vm"); err != nil {
+		t.Fatalf("relay ack after two marks: %v", err)
+	}
+	if n := countRows(t, a, pending); n != 0 {
+		t.Errorf("%d messages still pending after the ack, want 0", n)
+	}
+}
+
 // TestRelayOutLimitBounds: --limit defaults to 100 and accepts 1 through
 // 1000; anything else is a usage error, exit 2, which a transport must not
 // confuse with a cut stream.
