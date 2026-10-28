@@ -19,3 +19,7 @@ package deliver
 // recipient's replies at their real causal depth, which charges them against
 // the tighter per-pair budget. Imitating the marker costs the imitator.
 const PokeSentinel = "[pager-poke]"
+
+// PokeRecoveryHint is shared by the sender and the hook's standalone-poke
+// check, so adding user text after a poke never turns it into a blocked prompt.
+const PokeRecoveryHint = " If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."

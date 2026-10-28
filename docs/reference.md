@@ -30,6 +30,19 @@ nothing else.
 
 `pager send` tells you which path it took.
 
+A queued wake can arrive after a hook or `msg_list` already handled its mail.
+On `UserPromptSubmit`, pager blocks a standalone wake prompt when a successful
+inbox check finds no waiting messages. This prevents an empty model turn and
+preserves message history. Ordinary prompts, quoted markers and appended user
+text are not blocked. A failed inbox check remains fail-open. Normal user turns
+retain the existing re-injection of polled messages.
+
+After reinstalling, hooks launch the replacement executable, but existing
+`pager mcp` processes keep running their old code. Reconnect those MCP servers
+or restart their shared app-server. Closing and reopening a desktop window can
+leave that server running; verify that the MCP process was actually replaced.
+Restarting a shared server can interrupt other connected chats.
+
 ```
 poked <name> (uds) — written to its inbox; its own hook is what delivers
 note: <name> was not poked — it will be delivered on its next activity
@@ -674,6 +687,6 @@ A tmux status badge and an overlay TUI are later steps.
 ## Other documents
 
 - [../README.md](../README.md) — install and first use
-- [session-binding.md](session-binding.md) — the four resolution tiers, host
+- [session-binding.md](session-binding.md) — CLI resolution tiers, MCP request identity, host
   detection, isolation rules
 - [hooks.md](hooks.md) — event / input / output matrix, the fail-open contract

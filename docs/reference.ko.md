@@ -25,6 +25,17 @@
 
 `pager send` 는 어느 길로 갔는지 말한다.
 
+예약된 깨우기 알림은 훅이나 `msg_list`가 편지를 처리한 뒤에 도착할 수 있다.
+`UserPromptSubmit`에서 독립된 pager 알림이고 수신함 조회가 성공했으며 기다리는 편지가
+없다면 그 프롬프트를 차단해 빈 모델 턴을 막는다. 편지 기록은 보존한다. 일반 사용자 입력,
+인용된 표시, 사용자 지시가 덧붙은 입력은 차단하지 않는다. 수신함 조회 실패도 차단하지 않는다.
+일반 사용자 턴에서 조회한 편지를 다시 주입하는 기존 동작은 유지한다.
+
+재설치 후 훅은 교체된 실행 파일을 쓰지만 기존 `pager mcp` 프로세스는 이전 코드로 계속 돈다.
+MCP 서버를 재연결하거나 공유 app-server를 재시작해야 한다. 데스크톱 창을 닫고 다시 열어도
+공유 서버가 남을 수 있으므로 MCP 프로세스가 실제로 교체됐는지 확인한다. 공유 서버를 재시작하면
+연결된 다른 채팅의 작업도 중단될 수 있다.
+
 ```
 poked <이름> (uds) — written to its inbox; its own hook is what delivers
 note: <이름> was not poked — it will be delivered on its next activity
@@ -558,5 +569,5 @@ tmux 상태 배지와 오버레이 TUI는 후속 단계다.
 ## 다른 문서
 
 - [../README.ko.md](../README.ko.md) — 설치와 첫 사용
-- [session-binding.ko.md](session-binding.ko.md) — 세션 해석 4순위, 호스트 탐지, 격리 규칙
+- [session-binding.ko.md](session-binding.ko.md) — CLI 해석 순위, MCP 요청 식별자, 호스트 탐지, 격리 규칙
 - [hooks.ko.md](hooks.ko.md) — 이벤트·입력·출력 매트릭스, fail-open 계약

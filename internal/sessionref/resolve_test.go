@@ -29,8 +29,30 @@ func lookupReturning(id string) LookupFunc {
 	return func(context.Context, string, Instance) (string, error) { return id, nil }
 }
 
-// TestResolveTierOrder walks the full precedence table. Both the CLI and the
-// MCP server call this same method, so one table covers both.
+func TestCodexNativeThreadDoesNotFollowSharedHost(t *testing.T) {
+	for _, tc := range []struct {
+		name, thread, explicit, want string
+	}{
+		{"native wins", "this-chat", "", "this-chat"},
+		{"explicit remains authoritative", "this-chat", "override", "override"},
+		{"missing native refuses shared host", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTestResolver(map[string]string{"CODEX_THREAD_ID": tc.thread, "PAGER_SESSION": tc.explicit}, true, lookupReturning("other-chat"))
+			r.detect = func() (string, Instance, bool) { return Codex, fixedHost, true }
+			ref, err := r.Resolve(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ref.SessionID != tc.want {
+				t.Fatalf("session = %q, want %q", ref.SessionID, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveTierOrder walks explicit overrides and the non-Codex host fallback.
+// Codex's native invocation identity is covered separately above.
 func TestResolveTierOrder(t *testing.T) {
 	tests := []struct {
 		name       string
