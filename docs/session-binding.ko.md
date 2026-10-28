@@ -9,17 +9,18 @@
 
 ## 왜 우회로가 필요한가
 
-**MCP 프로토콜은 호출자의 `session_id`를 주지 않는다.** 세션 5개는 MCP 서버 프로세스
-5개(세션당 인스턴스 하나)이고, 환경변수에도 session_id가 없다. 그래서 MCP 경로는 자기
-세션을 스스로 알 수 없다.
+**MCP는 호출자의 `session_id`를 표준화하지 않지만, Codex는 각 호출의
+`_meta.threadId`로 호출 채팅을 전달한다.** Codex 데스크톱의 여러 채팅은 호스트 프로세스를
+공유할 수 있으므로 마지막으로 훅을 실행한 채팅을 다음 호출자로 간주하면 안 된다.
 
-CLI도 같은 문제를 겪는다. **`pager send`가 핵심 발신 경로**인데, 에이전트가 Bash 툴로
-부르는 CLI 역시 자기 session_id를 모른다. MCP만 해결하면 `pager send`가 전부
-`unattributed`로 자기 정책에 막힌다.
+Codex MCP는 요청 메타데이터를 사용하며, 훅이 기록한 유효 기간 내 Codex 세션인지 확인한다.
+식별자가 없거나 형식이 잘못되었거나 알려지지 않았다면 거부한다. 공유 호스트나 프로세스
+환경변수로 추측하지 않는다. CLI는 명시적 override 다음에 호출별 `CODEX_THREAD_ID`를 쓴다.
+Codex CLI 0.163.0과 현재 데스크톱 호스트의 0.165.0-alpha.1.2 바이너리에서 확인했다.
+격리한 app-server 호출에서도 임시 채팅의 정확한 ID가 `_meta.threadId`로 전달됐다.
 
-세션 문맥을 아는 유일한 주체는 **훅**이다. 훅은 stdin으로 `session_id`를 받는다.
-따라서 계약은 하나다 — **훅이 기록하고, 나머지가 조회한다.** CLI와 MCP는 같은
-resolver(`internal/sessionref`)를 공유한다.
+훅은 stdin의 `session_id`로 세션 기록을 만든다. 다른 클라이언트는 아래 호스트 조회를 유지한다.
+CLI resolver는 `internal/sessionref`이며, MCP는 요청별 식별자를 먼저 적용한다.
 
 ## 검증된 선례
 
@@ -83,17 +84,18 @@ pid = os.Getppid()
 프로세스 이름으로 폴백한다. `PAGER_` 접두사는 `CONTEXT_` 접두사가 아니므로 Claude Code의
 `CONTEXT_*` 환경변수 스크럽 대상이 아니다.
 
-## 해석 순위 — CLI·MCP 공통
+## CLI 해석 순위와 MCP 식별
 
-`internal/sessionref`의 단일 진입점이 이 순서대로 시도한다. **모든 발신 경로가 같은
-순위를 쓴다** — CLI든 MCP든 예외가 없다.
+CLI는 `internal/sessionref`에서 다음 순위를 따른다. Codex MCP는 위에서 설명한 요청별
+식별자를 매 호출마다 독립적으로 사용한다.
 
 | 순위 | 방법 | 적용 경로 |
 | --- | --- | --- |
 | 1 | `--session <id>` 인자 | 훅 (자기 stdin에 session_id가 있다), 스크립트 |
-| 2 | `PAGER_SESSION` 환경변수 | 훅이 심어두면 그 세션의 자식 프로세스 전부가 상속 |
-| 3 | 호스트 탐지 → 훅이 기록한 활성 세션 조회 | MCP 서버, 에이전트가 Bash로 부른 CLI |
-| 4 | 실패 → `unattributed` | 기본 **거부** (`--human` 없으면) |
+| 2 | `PAGER_SESSION` 환경변수 | 명시적 프로세스 설정 |
+| 3 | `CODEX_THREAD_ID` | Codex 호스트를 탐지한 CLI. ID가 없으면 호스트 폴백을 거부 |
+| 4 | 호스트 탐지 → 훅이 기록한 활성 세션 조회 | Claude CLI/MCP 등 다른 클라이언트 |
+| 5 | 실패 → `unattributed` | 기본 **거부** (`--human` 없으면) |
 
 ## 주소 레이어는 둘이다 — 자동 이름은 세 번째가 아니다
 

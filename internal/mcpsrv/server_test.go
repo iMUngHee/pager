@@ -144,6 +144,82 @@ func seed(t *testing.T, st *store.Store, id, alias string) {
 
 // --- tests -------------------------------------------------------------
 
+func TestThreadMetadataIsolatesSharedMCPServer(t *testing.T) {
+	st := newStore(t)
+	for _, id := range []string{"chat-a", "chat-b", "recipient"} {
+		seed(t, st, id, id+"-box")
+		if _, err := st.DB().ExecContext(t.Context(), "UPDATE sessions SET tool = 'codex' WHERE session_id = ?", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A process-wide environment or last-hook binding belongs to the other chat.
+	t.Setenv("PAGER_SESSION", "chat-b")
+	s := start(t, st)
+	for i, id := range []string{"chat-a", "chat-b", "chat-a"} {
+		resp := s.call(10+i, "tools/call", map[string]any{
+			"name": "msg_send", "_meta": map[string]any{"threadId": id},
+			"arguments": map[string]any{"target": "recipient-box", "body": "from " + id},
+		})
+		if isError(t, resp) {
+			t.Fatal(text(t, resp))
+		}
+		var sender string
+		if err := st.DB().QueryRowContext(t.Context(), "SELECT sender_session FROM messages ORDER BY id DESC LIMIT 1").Scan(&sender); err != nil {
+			t.Fatal(err)
+		}
+		if sender != id {
+			t.Fatalf("sender = %q, want %q", sender, id)
+		}
+	}
+	for _, id := range []string{"chat-a", "chat-b"} {
+		if _, err := deliver.Send(t.Context(), st, deliver.SendRequest{Alias: id + "-box", Body: "private " + id, Human: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp := s.call(20, "tools/call", map[string]any{"name": "msg_list", "_meta": map[string]any{"threadId": "chat-a"}, "arguments": map[string]any{"waiting": true}})
+	if isError(t, resp) || !strings.Contains(text(t, resp), "private chat-a") || strings.Contains(text(t, resp), "private chat-b") {
+		t.Fatalf("cross-chat listing: %s", text(t, resp))
+	}
+	var seen bool
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT listed_at IS NOT NULL FROM messages WHERE body='private chat-b'").Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen {
+		t.Fatal("reading chat-a marked chat-b's mail as read")
+	}
+}
+
+func TestInvalidThreadMetadataCannotFallBackToAnotherChat(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "other-chat", "other-box")
+	seed(t, st, "expired-codex", "expired-box")
+	if _, err := st.DB().ExecContext(t.Context(), "UPDATE sessions SET tool='codex', heartbeat_at=? WHERE session_id='expired-codex'", st.Now()-store.DefaultStale.Milliseconds()-1); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PAGER_SESSION", "other-chat")
+	s := start(t, st)
+	for i, identity := range []any{"unknown-chat", "", 123, nil, "other-chat", "expired-codex"} {
+		resp := s.call(30+i, "tools/call", map[string]any{"name": "msg_list", "_meta": map[string]any{"threadId": identity}, "arguments": map[string]any{}})
+		if !isError(t, resp) {
+			t.Fatalf("invalid identity %v fell back to other-chat", identity)
+		}
+	}
+}
+
+func TestCodexSessionRequiresRequestMetadata(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "codex-chat", "codex-box")
+	if _, err := st.DB().ExecContext(t.Context(), "UPDATE sessions SET tool='codex' WHERE session_id='codex-chat'"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PAGER_SESSION", "codex-chat")
+	s := start(t, st)
+	resp := s.call(40, "tools/call", map[string]any{"name": "msg_list", "arguments": map[string]any{}})
+	if !isError(t, resp) {
+		t.Fatal("Codex MCP accepted process-wide identity without request metadata")
+	}
+}
+
 func TestToolsAreAdvertised(t *testing.T) {
 	st := newStore(t)
 	s := start(t, st)

@@ -3,12 +3,14 @@
 // hookSpecificOutput.additionalContext object on stdout that the host folds
 // into the agent's next turn.
 //
-// Every path here fails open. A hook that exits non-zero or prints a
+// Errors here fail open. A hook that exits non-zero or prints a
 // diagnostic can stall or pollute the session it was meant to serve, and a
 // paging system that breaks the sessions it pages is worse than one that
 // silently delivers nothing. The cost is that a genuinely broken pager is
 // invisible from inside the session — `pager whoami` and `pager ls` are how it
 // becomes visible.
+// A successfully checked, already-consumed wake prompt is intentionally
+// blocked so the host does not spend a model turn on an empty notification.
 package hookio
 
 import (
@@ -121,6 +123,24 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	// "a user prompt" is allowed to mean.
 	if startsNewTurn(event, in) {
 		if err := deliver.ResetCausal(ctx, st, in.SessionID); err != nil {
+			return
+		}
+	}
+
+	// Queue entries can outlive the mail: a poll or an earlier hook may have
+	// consumed it while this poke waited behind a running turn. Check before
+	// collect, which intentionally re-injects polled messages on normal turns.
+	// Only a standalone wake prompt may be dropped, never quoted user text.
+	prompt := strings.TrimSpace(in.Prompt)
+	if event == EventUserPromptSubmit && strings.HasPrefix(prompt, "pager: new mail for ") &&
+		strings.Contains(prompt, deliver.PokeSentinel) && strings.HasSuffix(prompt, deliver.PokeRecoveryHint) &&
+		!strings.ContainsAny(prompt, "\r\n") {
+		pending, err := deliver.List(ctx, st, in.SessionID, deliver.FilterWaiting, deliver.LimitsFromEnv())
+		if err == nil && len(pending) == 0 {
+			_ = json.NewEncoder(stdout).Encode(struct {
+				Decision string `json:"decision"`
+				Reason   string `json:"reason"`
+			}{"block", "pager: this wake notification has already been handled; no unread mail remains."})
 			return
 		}
 	}

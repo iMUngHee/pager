@@ -10,20 +10,21 @@
 
 ## Why a workaround is needed at all
 
-**The MCP protocol does not give the caller's `session_id`.** Five sessions
-means five MCP server processes (one instance per session), and there is no
-session id in the environment either. So the MCP path cannot know its own
-session.
+**MCP does not standardize the caller's `session_id`, but Codex supplies
+`_meta.threadId` on each tool call.** Codex desktop chats can share one host
+process. Its last hook writer cannot identify the next caller.
 
-The CLI has the same problem. **`pager send` is the primary send path**, and a
-CLI invoked by an agent's Bash tool does not know its own session id either.
-Solving only MCP would leave every `pager send` `unattributed` and blocked by
-pager's own policy.
+Codex MCP uses request metadata and requires a fresh Codex session record
+written by a hook. Missing, malformed or unknown identity is refused, without
+falling back to the shared host or process-wide environment. The CLI uses its
+invocation-scoped `CODEX_THREAD_ID` after explicit overrides. Both paths were
+checked against Codex CLI 0.163.0 and the running desktop host's
+0.165.0-alpha.1.2 binary; isolated app-server calls returned the ephemeral
+thread's exact ID in `_meta.threadId`.
 
-The only party that knows the session context is **the hook**. Hooks receive
-`session_id` on stdin. So there is one contract — **the hook records, everyone
-else looks it up.** The CLI and MCP share one resolver
-(`internal/sessionref`).
+Hooks receive `session_id` on stdin and remain the source of session records.
+Other clients retain the host lookup below. The CLI resolver is
+`internal/sessionref`; MCP applies its request-scoped identity first.
 
 ## A proven precedent
 
@@ -96,17 +97,18 @@ variable first and falls back to the parent process name. The `PAGER_` prefix
 is not the `CONTEXT_` prefix, so it is not subject to Claude Code's `CONTEXT_*`
 environment scrubbing.
 
-## Resolution tiers — shared by CLI and MCP
+## CLI resolution tiers and MCP identity
 
-The single entry point in `internal/sessionref` tries these in order. **Every
-send path uses the same tiers** — CLI or MCP, no exceptions.
+The CLI entry point in `internal/sessionref` tries these in order. Codex MCP
+uses the request identity above, independently on every call.
 
 | Tier | Method | Where it applies |
 | --- | --- | --- |
 | 1 | `--session <id>` argument | Hooks (their own stdin has the session_id), scripts |
-| 2 | `PAGER_SESSION` environment variable | Planted by the hook, inherited by every child process of that session |
-| 3 | Host detection → look up the active session the hook recorded | MCP servers, a CLI the agent ran through Bash |
-| 4 | Failure → `unattributed` | **Refused** by default (without `--human`) |
+| 2 | `PAGER_SESSION` environment variable | Explicit process configuration |
+| 3 | `CODEX_THREAD_ID` | CLI with a detected Codex host; missing ID refuses host fallback |
+| 4 | Host detection → look up the active session the hook recorded | Other clients, including Claude CLI/MCP |
+| 5 | Failure → `unattributed` | **Refused** by default (without `--human`) |
 
 ## There are two addressing layers — the automatic name is not a third
 

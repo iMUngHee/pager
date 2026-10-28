@@ -98,6 +98,58 @@ func codexPayload(session, prompt string) string {
 		`"hook_event_name":"UserPromptSubmit","prompt":%q}`, session, workspace, prompt)
 }
 
+func TestConsumedPokeBlocksOnlyStandalonePrompt(t *testing.T) {
+	for _, state := range []string{"empty", "delivered", "seen", "pending"} {
+		t.Run(state, func(t *testing.T) {
+			detectionOff(t)
+			st := newEnv(t)
+			seedInbox(t, st, "s1", "codex", "inbox")
+			if state != "empty" {
+				id := queue(t, st, "inbox", "sender", "actual mail")
+				if state == "delivered" {
+					run(t, EventUserPromptSubmit, codexPayload("s1", "read mail"))
+				} else if state == "seen" {
+					if _, err := deliver.MarkListed(t.Context(), st, []int64{id}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			poke := wake.PokeBody("inbox", "sender", "codex")
+			var result struct {
+				Decision string `json:"decision"`
+				Reason   string `json:"reason"`
+			}
+			raw := run(t, EventUserPromptSubmit, codexPayload("s1", poke))
+			if raw != "" {
+				if err := json.Unmarshal([]byte(raw), &result); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "pending" {
+				if result.Decision == "block" || !strings.Contains(raw, "actual mail") {
+					t.Fatalf("pending mail did not deliver: %s", raw)
+				}
+			} else if result.Decision != "block" || result.Reason == "" {
+				t.Fatalf("consumed poke should block the empty turn: %s", raw)
+			}
+			for _, prompt := range []string{"normal user prompt", "Explain " + poke, poke + "\nAlso do my work", poke + " Also do my work"} {
+				if raw := run(t, EventUserPromptSubmit, codexPayload("s1", prompt)); strings.Contains(raw, `"decision":"block"`) {
+					t.Fatalf("blocked user text: %s", prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestPokeDatabaseFailureDoesNotBlock(t *testing.T) {
+	detectionOff(t)
+	t.Setenv("PAGER_DB", t.TempDir()) // A directory cannot be opened as a database.
+	raw := run(t, EventUserPromptSubmit, codexPayload("s1", wake.PokeBody("inbox", "sender", "codex")))
+	if strings.Contains(raw, `"decision":"block"`) {
+		t.Fatalf("blocked after database failure: %s", raw)
+	}
+}
+
 // --- automatic names ---------------------------------------------------
 
 // autoName matches the four-letter consonant-vowel shape the generator emits.

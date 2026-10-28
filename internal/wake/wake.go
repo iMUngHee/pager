@@ -193,7 +193,7 @@ func PokeBody(alias, label, tool string) string {
 		from += " (" + tool + " session)"
 	}
 	return "pager: new mail for " + alias + " from " + from + ". " + deliver.PokeSentinel +
-		" If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."
+		deliver.PokeRecoveryHint
 }
 
 // Describe renders the outcome for a human, or "" when there is nothing to say.

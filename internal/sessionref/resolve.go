@@ -22,6 +22,7 @@ type Source string
 const (
 	SourceFlag         Source = "flag"         // --session
 	SourceEnv          Source = "env"          // PAGER_SESSION
+	SourceNative       Source = "native"       // CODEX_THREAD_ID
 	SourceHost         Source = "host"         // host detection → recorded session
 	SourceUnattributed Source = "unattributed" // nothing resolved
 )
@@ -59,7 +60,7 @@ func New(lookup LookupFunc) *Resolver {
 	return &Resolver{getenv: os.Getenv, detect: Detect, lookup: lookup}
 }
 
-// Resolve applies the four tiers in order, where flag is the --session value
+// Resolve applies the five tiers in order, where flag is the --session value
 // and is empty when it was not given.
 //
 // Failing to resolve is not an error: it yields SourceUnattributed and lets the
@@ -84,7 +85,19 @@ func (r *Resolver) Resolve(ctx context.Context, flag string) (Ref, error) {
 		ref.SessionID, ref.Source = id, SourceEnv
 		return ref, nil
 	}
-	if !detected || r.lookup == nil {
+	if !detected {
+		return ref, nil
+	}
+	// A desktop app-server hosts several chats under one process. Its last
+	// hook writer is not the caller; the shell's native thread id is scoped
+	// to this invocation. Without it require an explicit session instead.
+	if client == Codex {
+		if id := strings.TrimSpace(r.getenv("CODEX_THREAD_ID")); id != "" {
+			ref.SessionID, ref.Source = id, SourceNative
+		}
+		return ref, nil
+	}
+	if r.lookup == nil {
 		return ref, nil
 	}
 

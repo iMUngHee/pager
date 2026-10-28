@@ -1,10 +1,9 @@
 // Package mcpsrv serves pager over MCP stdio, so an agent can page another
 // session with a tool call instead of a shell command.
 //
-// MCP carries no session identity, and one server process serves one session,
-// so the server resolves who it is exactly the way the CLI does: by detecting
-// the host process it descends from and reading the session a hook recorded
-// against it. See docs/session-binding.md.
+// Codex supplies the caller in each request's _meta.threadId. A shared host
+// process is not a chat identity. Other clients retain the hook-recorded host
+// binding. See docs/session-binding.md.
 package mcpsrv
 
 import (
@@ -108,13 +107,42 @@ func (s *Server) register() {
 // session resolves who this call is from. There is no way for a tool argument
 // to override it: letting a caller name its own sender would make the causal
 // depth it inherits a matter of choice.
-func (s *Server) session(ctx context.Context) (string, error) {
+func (s *Server) session(ctx context.Context, req mcp.CallToolRequest) (string, error) {
+	if req.Params.Meta != nil {
+		if raw, present := req.Params.Meta.AdditionalFields["threadId"]; present {
+			id, ok := raw.(string)
+			if !ok || strings.TrimSpace(id) == "" {
+				return "", fmt.Errorf("%w (invalid MCP _meta.threadId)", deliver.ErrUnattributed)
+			}
+			var known bool
+			if err := s.st.DB().QueryRowContext(ctx, `
+				SELECT EXISTS(SELECT 1 FROM sessions
+				 WHERE session_id = ? AND tool = 'codex' AND heartbeat_at >= ?)`,
+				id, s.st.Now()-store.DefaultStale.Milliseconds()).Scan(&known); err != nil {
+				return "", err
+			}
+			if !known {
+				return "", fmt.Errorf("%w (no fresh Codex hook record for MCP _meta.threadId)", deliver.ErrUnattributed)
+			}
+			return id, nil
+		}
+	}
 	ref, err := s.res.Resolve(ctx, "")
 	if err != nil {
 		return "", err
 	}
+	if ref.Client == sessionref.Codex {
+		return "", fmt.Errorf("%w (Codex MCP requires call-scoped _meta.threadId; reconnect or use CLI --session)", deliver.ErrUnattributed)
+	}
 	if !ref.Attributed() {
 		return "", fmt.Errorf("%w (no hook has recorded this session yet)", deliver.ErrUnattributed)
+	}
+	tool, err := deliver.SenderTool(ctx, s.st, ref.SessionID)
+	if err != nil {
+		return "", err
+	}
+	if tool == sessionref.Codex {
+		return "", fmt.Errorf("%w (Codex MCP requires call-scoped _meta.threadId; reconnect or use CLI --session)", deliver.ErrUnattributed)
 	}
 	return ref.SessionID, nil
 }
@@ -128,7 +156,7 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultError("target and body are both required"), nil
 	}
 
-	sender, err := s.session(ctx)
+	sender, err := s.session(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -185,7 +213,7 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	waiting, _ := args["waiting"].(bool)
 	expired, _ := args["expired"].(bool)
 
-	session, err := s.session(ctx)
+	session, err := s.session(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
