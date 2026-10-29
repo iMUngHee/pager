@@ -152,7 +152,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 		   AND m.delivered_at IS NULL
 		   AND m.created_at >= ?
 		   AND (m.claim_expires_at IS NULL OR m.claim_expires_at < ?)
-		 ORDER BY m.id`, session, windowStart, now)
+		 ORDER BY m.listed_at IS NOT NULL, m.id`, session, windowStart, now)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list candidates: %w", err)
 	}
@@ -171,8 +171,9 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	}
 
 	// This count is not part of the delivery decision -- the candidate SELECT
-	// above is, and it deliberately ignores listed_at so a polled message is
-	// re-injected. This one exists to be rendered, and renderTail spends it on a
+	// above is, and polled mail remains eligible but follows unread mail so it
+	// cannot fill the batch before the new mail a wake announces. This count
+	// exists to be rendered, and renderTail spends it on a
 	// sentence that names `pager ls --expired`. So it has to be counted the way
 	// that command counts: a message an agent has already read by polling needs
 	// no resending, and reporting it here would point the reader at a listing

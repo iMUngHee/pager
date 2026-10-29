@@ -23,6 +23,7 @@ const workspace = "/tmp/hook-workspace"
 // seeding it. Nothing here may touch the real inbox.
 func newEnv(t *testing.T) *store.Store {
 	t.Helper()
+	t.Setenv("PAGER_WAKE", "off") // Queue cleanup must not reach the surrounding host.
 	path := filepath.Join(t.TempDir(), "msg.db")
 	t.Setenv("PAGER_DB", path)
 

@@ -12,6 +12,22 @@ import (
 
 // --- helpers -----------------------------------------------------------
 
+func TestUnreadMailPrecedesPolledMailWithinBatchBudget(t *testing.T) {
+	st, _ := newStore(t)
+	inboxSession(t, st, "B", "inboxB")
+	old := queue(t, st, "inboxB", "sender", "already polled")
+	if _, err := MarkListed(t.Context(), st, []int64{old}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := queue(t, st, "inboxB", "sender", "new unread mail")
+	lim := DefaultLimits()
+	lim.MaxBatch = 1
+	batch := collect(t, st, "B", lim)
+	if len(batch.Messages) != 1 || batch.Messages[0].ID != fresh {
+		t.Fatalf("batch=%+v, want new unread message %d before old polled mail", batch.Messages, fresh)
+	}
+}
+
 // TestExpiredCountMatchesTheExpiredListing closes a gap between two surfaces
 // that name each other. renderTail tells a session "N messages past the delivery
 // window and no longer sent automatically (`pager ls --expired`)", so the number

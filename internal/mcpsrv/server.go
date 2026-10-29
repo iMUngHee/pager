@@ -19,6 +19,7 @@ import (
 	"github.com/iMUngHee/pager/internal/dispatch"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 const (
@@ -237,6 +238,10 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		}
 	}
 	_, markErr := deliver.MarkListed(ctx, s.st, fresh)
+	var clearErr error
+	if markErr == nil && len(fresh) > 0 {
+		clearErr = wake.ClearCodexQueue(ctx, s.st, session)
+	}
 
 	// The rendering below reads the slice as it was scanned, before the stamp,
 	// so the listing that first surfaces a message still prints it as waiting
@@ -264,6 +269,9 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	// exactly like a working poll while every later one repeated itself.
 	if markErr != nil {
 		fmt.Fprintf(&sb, "\nnote: could not record these as read (%v); they will be listed again\n", markErr)
+	}
+	if clearErr != nil {
+		fmt.Fprintf(&sb, "\nnote: mail was read, but pending wake cleanup was deferred (%v)\n", clearErr)
 	}
 	return mcp.NewToolResultText(sb.String()), nil
 }

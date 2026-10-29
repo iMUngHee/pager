@@ -43,6 +43,9 @@ const (
 	// what proves delivery, by recording it.
 	Woken Outcome = "woken"
 
+	// Coalesced means an existing queued notification already covers the mail.
+	Coalesced Outcome = "coalesced"
+
 	// Queued means no poke happened and the hook will deliver later. This is
 	// the pre-wake behaviour and is never an error.
 	Queued Outcome = "queued"
@@ -85,6 +88,8 @@ type waker interface {
 // from something other than the error value.
 var ErrRefused = errors.New("peer refused the poke")
 
+var errAlreadyQueued = errors.New("pager wake already queued")
+
 // adapters returns the surfaces to try, in order.
 //
 // Fresh instances per call: an adapter may cache what it resolved between
@@ -126,6 +131,9 @@ func Wake(ctx context.Context, sessionID, body string) Result {
 		err := pokeWithRetry(ctx, w, sessionID, body)
 		if err == nil {
 			return Result{Outcome: Woken, Via: w.name()}
+		}
+		if errors.Is(err, errAlreadyQueued) {
+			return Result{Outcome: Coalesced, Via: w.name()}
 		}
 		return Result{Outcome: classify(err), Via: w.name(), Err: err}
 	}
@@ -206,6 +214,8 @@ func Describe(r Result, alias string) string {
 	switch r.Outcome {
 	case Woken:
 		return "poked " + alias + " (" + r.Via + ") — written to its inbox; its own hook is what delivers"
+	case Coalesced:
+		return "note: " + alias + " already has a pending wake — mail stored without another notification"
 	case Refused:
 		return "note: " + alias + " has a live inbox but refused the poke (" + r.Via +
 			") — it will be delivered on its next activity. This usually means the host's messaging contract changed."

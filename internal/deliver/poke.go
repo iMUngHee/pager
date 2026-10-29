@@ -1,5 +1,7 @@
 package deliver
 
+import "strings"
+
 // PokeSentinel marks a prompt as pager's own wake poke rather than something a
 // person typed.
 //
@@ -23,3 +25,12 @@ const PokeSentinel = "[pager-poke]"
 // PokeRecoveryHint is shared by the sender and the hook's standalone-poke
 // check, so adding user text after a poke never turns it into a blocked prompt.
 const PokeRecoveryHint = " If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."
+
+// IsPokePrompt recognizes a complete generated notification, not user text
+// quoting the marker or appending an instruction to the notification.
+func IsPokePrompt(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, "pager: new mail for ") &&
+		strings.Contains(text, PokeSentinel) && strings.HasSuffix(text, PokeRecoveryHint) &&
+		!strings.ContainsAny(text, "\r\n")
+}
