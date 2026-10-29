@@ -69,22 +69,29 @@ type Record struct {
 	// The relay fields: provenance of mail imported from another store
 	// (src_*), and the progress of mail addressed to one (dst_*, relayed_at,
 	// relay_result). All null for local mail.
-	SrcPeer     *string `json:"src_peer"`
-	SrcStore    *string `json:"src_store"`
-	SrcID       *int64  `json:"src_id"`
-	SrcFrom     *string `json:"src_from"`
-	DstPeer     *string `json:"dst_peer"`
-	DstLink     *string `json:"dst_link"`
-	DstSeq      *int64  `json:"dst_seq"`
-	RelayedAt   *string `json:"relayed_at"`
-	RelayResult *string `json:"relay_result"`
-	Body        string  `json:"body"`
+	SrcPeer          *string `json:"src_peer"`
+	SrcStore         *string `json:"src_store"`
+	SrcID            *int64  `json:"src_id"`
+	SrcFrom          *string `json:"src_from"`
+	DstPeer          *string `json:"dst_peer"`
+	DstLink          *string `json:"dst_link"`
+	DstSeq           *int64  `json:"dst_seq"`
+	RelayedAt        *string `json:"relayed_at"`
+	RelayResult      *string `json:"relay_result"`
+	Body             string  `json:"body"`
+	Task             string  `json:"task,omitempty"`
+	EventKind        string  `json:"event_kind,omitempty"`
+	Activity         string  `json:"activity,omitempty"`
+	Progress         string  `json:"progress,omitempty"`
+	EventID          *string `json:"event_id,omitempty"`
+	RecipientSession *string `json:"recipient_session,omitempty"`
+	WakeNote         string  `json:"wake_note,omitempty"`
 }
 
 // recordColumns is the SELECT list Record scans, in Record's own order.
 const recordColumns = `id, created_at, alias, sender_session, sender_label,
 	origin, cause_id, hop, delivered_at, delivery_seq, listed_at,
-	src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result, body`
+	src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result, body,task,event_kind,activity,progress,event_id,recipient_session,wake_note`
 
 // archivePath is where a database's archive lives.
 func archivePath(dbPath string) string {
@@ -227,28 +234,36 @@ func repairTail(f *os.File) (int64, error) {
 func eachRecord(rows *sql.Rows, fn func(Record) error) error {
 	for rows.Next() {
 		var (
-			r         Record
-			created   int64
-			sender    sql.NullString
-			cause     sql.NullInt64
-			delivered sql.NullInt64
-			seq       sql.NullInt64
-			listed    sql.NullInt64
-			srcPeer   sql.NullString
-			srcStore  sql.NullString
-			srcID     sql.NullInt64
-			srcFrom   sql.NullString
-			dstPeer   sql.NullString
-			dstLink   sql.NullString
-			dstSeq    sql.NullInt64
-			relayed   sql.NullInt64
-			result    sql.NullString
+			r                  Record
+			created            int64
+			sender             sql.NullString
+			cause              sql.NullInt64
+			delivered          sql.NullInt64
+			seq                sql.NullInt64
+			listed             sql.NullInt64
+			srcPeer            sql.NullString
+			srcStore           sql.NullString
+			srcID              sql.NullInt64
+			srcFrom            sql.NullString
+			dstPeer            sql.NullString
+			dstLink            sql.NullString
+			dstSeq             sql.NullInt64
+			relayed            sql.NullInt64
+			result             sql.NullString
+			eventID, recipient sql.NullString
 		)
 		if err := rows.Scan(&r.ID, &created, &r.Alias, &sender, &r.SenderLabel,
 			&r.Origin, &cause, &r.Hop, &delivered, &seq, &listed,
 			&srcPeer, &srcStore, &srcID, &srcFrom, &dstPeer, &dstLink, &dstSeq, &relayed, &result,
-			&r.Body); err != nil {
+			&r.Body, &r.Task, &r.EventKind, &r.Activity, &r.Progress, &eventID, &recipient, &r.WakeNote); err != nil {
 			return fmt.Errorf("scan message: %w", err)
+		}
+		r.EventID, r.RecipientSession = nullString(eventID), nullString(recipient)
+		if r.EventKind == "update" {
+			r.EventKind = ""
+		}
+		if r.Activity == "unknown" {
+			r.Activity = ""
 		}
 		r.SrcPeer, r.SrcStore, r.SrcFrom = nullString(srcPeer), nullString(srcStore), nullString(srcFrom)
 		r.DstPeer, r.DstLink, r.RelayResult = nullString(dstPeer), nullString(dstLink), nullString(result)

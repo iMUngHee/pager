@@ -147,7 +147,8 @@ laptop$ pager send kipa@vm "파서 작업 넘긴다"
 laptop$ pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
 ```
 
-인과 hop이 메시지와 함께 넘어가므로, 루프 방지는 머신을 건너도 그대로 유지됩니다. 상태 값, exit
+인과 정보와 버전별 이벤트 메타데이터가 메시지와 함께 넘어갑니다. 원격 작업 신호가 unknown이면
+루프라고 단정해 차단하지 않습니다. 상태 값, exit
 code, 레코드 형식, peer 수명 주기 같은 전체 계약은
 [reference.ko.md](docs/reference.ko.md#저장소-사이의-relay)에 있습니다.
 
@@ -162,7 +163,7 @@ relay된 메일은 pager가 직접 쓰는 줄로 그 사실이 표시됩니다.
 
 ## 문서
 
-- [reference.ko.md](docs/reference.ko.md) — 설정, 보관, 발신 제한, 컬럼의 뜻, 고장났을 때
+- [reference.ko.md](docs/reference.ko.md) — 설정, 보관, 유휴 루프 보호, 컬럼의 뜻, 고장났을 때
 - [hooks.ko.md](docs/hooks.ko.md) — 훅 계약: 이벤트 · 입력 · 출력 · fail-open
 - [session-binding.ko.md](docs/session-binding.ko.md) — 세션을 어떻게 식별하나
 

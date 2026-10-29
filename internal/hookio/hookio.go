@@ -231,12 +231,11 @@ func collect(ctx context.Context, st *store.Store, session, event string) inject
 // delivered through the host's injection path and reaches the hook looking
 // exactly like typed input. Measured before the exclusion existed: one poke
 // moved the recipient's causal epoch and cleared its inbound pointer, so the
-// reply it prompted would have been billed as human-origin instead of caused.
+// reply it prompted would have lost its causal attribution.
 // Mail arriving is not a person taking the conversation somewhere new.
 //
-// A prompt that merely quotes the sentinel gets the same treatment. That is
-// self-limiting: keeping the chain intact bills replies against the tighter
-// per-pair budget, so there is nothing to gain by imitating the marker.
+// Only a complete generated notification gets this treatment. Quoted markers
+// and notifications with appended user instructions retain normal user intent.
 func startsNewTurn(event string, in Input) bool {
 	if event != EventUserPromptSubmit {
 		return false

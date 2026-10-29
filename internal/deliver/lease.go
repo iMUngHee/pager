@@ -73,11 +73,13 @@ func durationVar(name string, target *time.Duration) {
 
 // Pending is one message eligible for injection.
 type Pending struct {
-	ID        int64
-	Sender    string
-	Body      string
-	Hop       int
-	CreatedAt int64
+	Kind        string
+	PauseReason string
+	ID          int64
+	Sender      string
+	Body        string
+	Hop         int
+	CreatedAt   int64
 	// SrcPeer and SrcFrom are set for mail imported from another store: the
 	// peer it came through and the sender's reply name there, if any.
 	SrcPeer string
@@ -146,13 +148,13 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 
 	rows, err := st.DB().QueryContext(ctx, `
 		SELECT m.id, COALESCE(m.sender_label, ''), m.body, m.hop, m.created_at,
-		       COALESCE(m.src_peer, ''), COALESCE(m.src_from, '')
+		       COALESCE(m.src_peer, ''), COALESCE(m.src_from, ''),m.event_kind,m.wake_note
 		  FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?
 		   AND m.delivered_at IS NULL
 		   AND m.created_at >= ?
 		   AND (m.claim_expires_at IS NULL OR m.claim_expires_at < ?)
-		 ORDER BY m.listed_at IS NOT NULL, m.id`, session, windowStart, now)
+		 ORDER BY m.listed_at IS NOT NULL, m.event_kind = 'update', m.id`, session, windowStart, now)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list candidates: %w", err)
 	}
@@ -161,7 +163,7 @@ func Candidates(ctx context.Context, st *store.Store, session string, lim Limits
 	var out []Pending
 	for rows.Next() {
 		var p Pending
-		if err := rows.Scan(&p.ID, &p.Sender, &p.Body, &p.Hop, &p.CreatedAt, &p.SrcPeer, &p.SrcFrom); err != nil {
+		if err := rows.Scan(&p.ID, &p.Sender, &p.Body, &p.Hop, &p.CreatedAt, &p.SrcPeer, &p.SrcFrom, &p.Kind, &p.PauseReason); err != nil {
 			return nil, 0, fmt.Errorf("list candidates: %w", err)
 		}
 		out = append(out, p)

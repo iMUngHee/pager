@@ -26,6 +26,22 @@ var migrations = [...]string{
 	`ALTER TABLE messages ADD COLUMN listed_at INTEGER`, // 1 -> 2
 	`ALTER TABLE sessions ADD COLUMN purpose TEXT`,      // 2 -> 3
 	relayDDL, // 3 -> 4
+	`ALTER TABLE messages ADD COLUMN task TEXT NOT NULL DEFAULT '';
+ALTER TABLE messages ADD COLUMN event_kind TEXT NOT NULL DEFAULT 'update';
+ALTER TABLE messages ADD COLUMN activity TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE messages ADD COLUMN progress TEXT NOT NULL DEFAULT '';
+ALTER TABLE messages ADD COLUMN event_id TEXT;
+ALTER TABLE messages ADD COLUMN recipient_session TEXT;
+ALTER TABLE messages ADD COLUMN wake_note TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX messages_event ON messages(COALESCE(sender_session, ''), alias, task, event_id)
+  WHERE event_id IS NOT NULL AND src_peer IS NULL;
+CREATE INDEX messages_exchange ON messages(sender_session, recipient_session, task, id);
+CREATE TABLE loop_guard (
+  a TEXT NOT NULL, b TEXT NOT NULL, task TEXT NOT NULL,
+  fingerprint TEXT NOT NULL, unchanged_since INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY(a, b, task)
+);
+CREATE INDEX loop_guard_updated ON loop_guard(updated_at);`, // 4 -> 5
 }
 
 // schemaVersion is the user_version this binary expects. len of an array is a

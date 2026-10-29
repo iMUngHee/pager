@@ -238,6 +238,9 @@ func (s *Store) releasePruneLease(ctx context.Context, token string) (bool, erro
 // When archiving is switched off the guarantee is explicitly given up and the
 // delete proceeds exactly as it did before.
 func (s *Store) deleteExpired(ctx context.Context, cutoff int64) (int64, error) {
+	if _, err := s.Exec(ctx, "DELETE FROM loop_guard WHERE updated_at < ?", cutoff); err != nil {
+		return 0, fmt.Errorf("prune loop state: %w", err)
+	}
 	recs, err := s.selectDeletable(ctx, cutoff, pruneBatch)
 	if err != nil || len(recs) == 0 {
 		return 0, err

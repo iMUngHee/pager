@@ -153,8 +153,8 @@ laptop$ pager send kipa@vm "the parser work is yours"
 laptop$ pager relay out --peer vm | ssh vm pager relay in --peer laptop | pager relay ack --peer vm
 ```
 
-The causal hop crosses with the message, so the loop guard holds across
-machines too. The full contract — statuses, exit codes, record format, peer
+Causal attribution and versioned event metadata cross with the message.
+Unknown remote work signals never trigger a loop pause. The full contract — statuses, exit codes, record format, peer
 lifecycle — is in [reference.md](docs/reference.md#relaying-between-stores).
 
 ## One safety note
@@ -170,7 +170,7 @@ writes itself.
 
 ## Documentation
 
-- [reference.md](docs/reference.md) — configuration, retention, rate limits,
+- [reference.md](docs/reference.md) — configuration, retention, idle-loop protection,
   column meanings, troubleshooting
 - [hooks.md](docs/hooks.md) — hook contract: events, inputs, outputs, fail-open
 - [session-binding.md](docs/session-binding.md) — how a session is identified
