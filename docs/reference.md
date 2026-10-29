@@ -538,9 +538,21 @@ to the hook path. Putting it in the `env` block of `~/.claude/settings.json`
 applies it to every new session. It is an unannounced flag, so it may disappear
 in a release — and if it does, only knocking stops, silently.
 
-**codex needs no extra setting.** `codex queue` is a public CLI. But a thread
-must have a rollout, so **a session that has never run a turn cannot be
-knocked.**
+**Codex needs its CLI on PATH and the native app-server queue methods.** A thread
+must have a persisted rollout, so **a session that has never run a turn cannot
+be knocked.** `CODEX_HOME` selects both rollout discovery and queue state.
+
+Pager keeps at most one pending notification per thread, serializing concurrent
+senders with a pager-owned SQLite lock. It merges old duplicate notifications
+through native queue list/delete/add APIs without editing Codex's queue database.
+Every mail remains stored. Reading mail through MCP or delivering it through a
+hook removes obsolete queued notifications; ordinary queued user inputs remain.
+Unread mail takes priority over previously polled mail within the hook batch.
+An already-consumed notification is blocked before a model request.
+
+These queue APIs are experimental. Unsupported responses, lock failures or a
+missing CLI defer the wake and preserve mail rather than adding blindly. After
+upgrading pager, restart persistent MCP clients before testing the new behavior.
 
 Every default is an **estimate**, chosen without production metrics.
 

@@ -64,6 +64,17 @@ func TestNoSurfaceIsQueued(t *testing.T) {
 	}
 }
 
+func TestExistingQueueWakeHasItsOwnOutcome(t *testing.T) {
+	useAdapters(t, &stub{label: "codex-queue", reachable: true, errs: []error{errAlreadyQueued}})
+	got := Wake(t.Context(), "t1", "body")
+	if got.Outcome != Coalesced || got.Err != nil {
+		t.Fatalf("coalesced result=%+v", got)
+	}
+	if line := Describe(got, "box"); !strings.Contains(line, "without another notification") {
+		t.Fatalf("misleading result: %s", line)
+	}
+}
+
 // TestDisabledNeverPokes covers the switch the test pins depend on. If off ever
 // stopped meaning off, every package that runs a send would start reaching for
 // the surrounding host mid-test.

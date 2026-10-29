@@ -25,6 +25,7 @@ import (
 	"github.com/iMUngHee/pager/internal/deliver"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 // Hook events pager reacts to.
@@ -131,10 +132,7 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	// consumed it while this poke waited behind a running turn. Check before
 	// collect, which intentionally re-injects polled messages on normal turns.
 	// Only a standalone wake prompt may be dropped, never quoted user text.
-	prompt := strings.TrimSpace(in.Prompt)
-	if event == EventUserPromptSubmit && strings.HasPrefix(prompt, "pager: new mail for ") &&
-		strings.Contains(prompt, deliver.PokeSentinel) && strings.HasSuffix(prompt, deliver.PokeRecoveryHint) &&
-		!strings.ContainsAny(prompt, "\r\n") {
+	if event == EventUserPromptSubmit && deliver.IsPokePrompt(in.Prompt) {
 		pending, err := deliver.List(ctx, st, in.SessionID, deliver.FilterWaiting, deliver.LimitsFromEnv())
 		if err == nil && len(pending) == 0 {
 			_ = json.NewEncoder(stdout).Encode(struct {
@@ -159,7 +157,9 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	if text.token != "" {
 		// Best-effort: the messages have already been written out, and an
 		// unconfirmed claim is retried rather than lost.
-		_, _ = deliver.ConfirmDelivery(ctx, st, in.SessionID, text.token)
+		if _, err := deliver.ConfirmDelivery(ctx, st, in.SessionID, text.token); err == nil {
+			_ = wake.ClearCodexQueue(ctx, st, in.SessionID)
+		}
 	}
 
 	// Housekeeping rides along on whichever hook wins the gate.
