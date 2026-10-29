@@ -91,6 +91,11 @@ func send(args []string) error {
 	session := fs.String("session", "", "sending session id")
 	human := fs.Bool("human", false, "assert this send is operator-initiated, not agent-initiated")
 	label := fs.String("label", "", "how the recipient sees the sender")
+	task := fs.String("task", "", "optional cooperative task scope")
+	kind := fs.String("kind", "update", "update, result, failure, or release; important events bypass wake pauses")
+	activity := fs.String("activity", "unknown", "working, idle, or unknown; only affirm idle when no work is running")
+	progress := fs.String("progress", "", "real tool/test/artifact checkpoint, not a per-message counter")
+	event := fs.String("event", "", "stable event ID for retry idempotency")
 	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
@@ -118,7 +123,8 @@ func send(args []string) error {
 	}
 
 	res, err := dispatch.Send(ctx, st, dispatch.Request{
-		Target: target, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
+		Metadata: deliver.Metadata{Task: *task, Kind: *kind, Activity: *activity, Progress: *progress, EventID: *event},
+		Target:   target, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
 	})
 	if res.Sent.ID != 0 { // stored, even if reporting on it failed
 		fmt.Println(res.Head())
@@ -229,6 +235,9 @@ func list(args []string) error {
 	fmt.Fprintln(tw, "ID\tINBOX\tFROM\tSTATE\tBODY")
 	for _, m := range messages {
 		fmt.Fprintf(tw, "#%d\t%s\t%s\t%s\t%s\n", m.ID, m.Alias, deliver.SanitizeLabel(m.Sender), m.State(), firstLine(m.Body))
+		if m.PauseReason != "" {
+			fmt.Fprintf(tw, "\t\t\t\t%s\n", deliver.PauseSummary(m.PauseReason))
+		}
 		// Under the BODY column, on a row with no id: a row pager did not write
 		// cannot look like this one.
 		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {

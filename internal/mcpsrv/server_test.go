@@ -27,6 +27,34 @@ type session struct {
 	out *bufio.Reader
 }
 
+func TestEventMetadataAndRetryTravelThroughActualMCPProtocol(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "sender", "sender-box")
+	seed(t, st, "receiver", "receiver-box")
+	t.Setenv("PAGER_SESSION", "sender")
+	s := start(t, st)
+	args := map[string]any{"target": "receiver-box", "body": "GPU released", "kind": "release", "activity": "idle", "task": "gpu-job", "progress": "process exited", "event_id": "lease-1"}
+	for _, id := range []int{2, 3} {
+		r := s.call(id, "tools/call", map[string]any{"name": "msg_send", "arguments": args})
+		if isError(t, r) || !strings.Contains(text(t, r), "sent #1") {
+			t.Fatalf("event retry: %v", r)
+		}
+	}
+	var n int
+	var kind, activity, task, progress string
+	if err := st.DB().QueryRow("SELECT count(*),event_kind,activity,task,progress FROM messages").Scan(&n, &kind, &activity, &task, &progress); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || kind != "release" || activity != "idle" || task != "gpu-job" || progress != "process exited" {
+		t.Fatalf("MCP metadata=%d %q %q %q %q", n, kind, activity, task, progress)
+	}
+	args["body"] = "conflicting state"
+	r := s.call(4, "tools/call", map[string]any{"name": "msg_send", "arguments": args})
+	if !isError(t, r) || !strings.Contains(text(t, r), "different content") {
+		t.Fatalf("conflicting event accepted: %v", r)
+	}
+}
+
 func start(t *testing.T, st *store.Store) *session {
 	t.Helper()
 	inR, inW := io.Pipe()

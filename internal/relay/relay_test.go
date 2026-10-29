@@ -27,6 +27,68 @@ type node struct {
 	id   string
 }
 
+// Historical values used to prove ordinary imports no longer wait for an hourly quota.
+const maxInboundPeer = 60
+
+func TestExtendedEventMetadataAndLongChainsCrossRelay(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "sender", "sape")
+	session(t, b, "receiver", "kipa")
+	meta := deliver.Metadata{Task: "gpu-job", Kind: "release", Activity: "idle", Progress: "process exited", EventID: "gpu-lease-7"}
+	sent, err := deliver.Send(t.Context(), a.st, deliver.SendRequest{Alias: "kipa@vm", Peer: "vm", Sender: "sender", Body: "GPU released", Metadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.st.DB().Exec("UPDATE messages SET hop=45 WHERE id=?", sent.ID); err != nil {
+		t.Fatal(err)
+	}
+	stream := out(t, a)
+	var wire Record
+	if err := json.Unmarshal(bytes.TrimSpace(stream), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.V != 2 || wire.Hop != 45 || wire.Metadata != meta {
+		t.Fatalf("metadata lost on wire: %+v", wire)
+	}
+	rs, code := in(t, b, "mac", stream)
+	if code != 0 || len(rs) != 1 || rs[0].Status != StatusImported {
+		t.Fatalf("import=%+v exit=%d", rs, code)
+	}
+	var got deliver.Metadata
+	var hop int
+	if err := b.st.DB().QueryRow("SELECT task,event_kind,activity,progress,event_id,hop FROM messages WHERE src_peer='mac'").Scan(&got.Task, &got.Kind, &got.Activity, &got.Progress, &got.EventID, &hop); err != nil {
+		t.Fatal(err)
+	}
+	if got != meta || hop != 45 {
+		t.Fatalf("stored metadata=%+v hop=%d", got, hop)
+	}
+	if code := ack(t, a, encode(t, rs[0])); code != 0 {
+		t.Fatalf("ack exit=%d", code)
+	}
+	if len(out(t, a)) != 0 {
+		t.Fatal("acknowledged event remained in relay out")
+	}
+}
+
+func TestBasicRelayKeepsV1AndRejectsSemanticSmuggling(t *testing.T) {
+	a, b := pair(t)
+	session(t, a, "sender", "sape")
+	session(t, b, "receiver", "kipa")
+	sendRemote(t, a, "sender", "kipa", "ordinary mail")
+	var wire Record
+	if err := json.Unmarshal(bytes.TrimSpace(out(t, a)), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.V != 1 {
+		t.Fatalf("basic mail unnecessarily requires v%d", wire.V)
+	}
+	wire.Metadata.Kind = "release"
+	rs, _ := in(t, b, "mac", encode(t, wire))
+	if len(rs) != 1 || rs[0].Status != StatusRejected || !strings.Contains(rs[0].Reason, "v2") {
+		t.Fatalf("v1 semantic extension accepted: %+v", rs)
+	}
+}
+
 func newNode(t *testing.T) node {
 	t.Helper()
 	fake := clock.NewFake(testBase)
@@ -299,7 +361,7 @@ func TestRelayInDecisionTable(t *testing.T) {
 		{name: "body too large", rec: next(func(r *Record) { r.Body = strings.Repeat("x", deliver.MaxRelayBody+1) }), status: StatusRejected, reason: "body too large", seqAfter: 2, cont: true},
 		{name: "origin already imported", rec: next(func(r *Record) { r.Origin.ID = 1 }), status: StatusDuplicate, seqAfter: 2, cont: true},
 		{
-			name: "per-peer cap",
+			name: "past historical per-peer cap",
 			prep: func(t *testing.T, a, b node) {
 				for i := 0; i < maxInboundPeer; i++ {
 					if _, err := b.st.DB().ExecContext(t.Context(), `
@@ -309,7 +371,7 @@ func TestRelayInDecisionTable(t *testing.T) {
 					}
 				}
 			},
-			rec: next(nil), status: StatusDeferred, reason: "rate", seqAfter: 1,
+			rec: next(nil), status: StatusImported, seqAfter: 2, cont: true,
 		},
 		{name: "to empty", rec: next(func(r *Record) { r.To = "" }), status: StatusRejected, reason: "no such alias", seqAfter: 2, cont: true},
 		{name: "to with @", rec: next(func(r *Record) { r.To = "kipa@vm" }), status: StatusRejected, reason: "no such alias", seqAfter: 2, cont: true},
@@ -635,34 +697,29 @@ func TestRejectionNamesEachLiveSessionOnce(t *testing.T) {
 	}
 }
 
-// TestRelayInDefersAtPeerCap: past the per-peer cap a record is deferred, not
-// lost, with a retry hint; once the window has moved it imports.
-func TestRelayInDefersAtPeerCap(t *testing.T) {
+// TestRelayInContinuesPastFormerPeerQuota imports immediately and deduplicates retries.
+func TestRelayInContinuesPastFormerPeerQuota(t *testing.T) {
 	a, b := pair(t)
 	session(t, a, "s-sape", "sape")
 	session(t, b, "s-kipa", "kipa")
-	for i := 0; i < maxInboundPeer; i++ {
-		if _, err := b.st.DB().ExecContext(t.Context(), `
-			INSERT INTO messages(alias, body, hop, origin, created_at, src_peer, src_store, src_id)
-			VALUES ('kipa', 'x', 0, 'human', ?, 'mac', ?, ?)`, b.st.Now(), a.id, 1000+i); err != nil {
-			t.Fatalf("seed import: %v", err)
+	for i := 0; i < maxInboundPeer+5; i++ {
+		sendRemote(t, a, "s-sape", "kipa", fmt.Sprintf("ordinary exchange %d", i))
+	}
+	stream := out(t, a)
+	rs, code := in(t, b, "mac", stream)
+	if code != 0 || len(rs) != maxInboundPeer+5 {
+		t.Fatalf("results=%d, exit=%d", len(rs), code)
+	}
+	for _, r := range rs {
+		if r.Status != StatusImported {
+			t.Fatalf("unexpected quota: %+v", r)
 		}
 	}
-	sendRemote(t, a, "s-sape", "kipa", "over the cap")
-	stream := out(t, a)
-
-	rs, code := in(t, b, "mac", stream)
-	if code != 0 || len(rs) != 1 || rs[0].Status != StatusDeferred || !strings.Contains(rs[0].Reason, "rate") {
-		t.Fatalf("results = %+v exit %d, want deferred(rate) exit 0", rs, code)
-	}
-	if rs[0].RetryAfterMS <= 0 {
-		t.Errorf("retry_after_ms = %d, want a positive hint", rs[0].RetryAfterMS)
-	}
-
-	b.fake.Advance(inboundWindow + time.Second)
-	rs, _ = in(t, b, "mac", stream)
-	if len(rs) != 1 || rs[0].Status != StatusImported {
-		t.Errorf("after the window: %+v, want imported", rs)
+	rs, code = in(t, b, "mac", stream)
+	for _, r := range rs {
+		if r.Status != StatusDuplicate {
+			t.Fatalf("retry=%+v, exit=%d", r, code)
+		}
 	}
 }
 

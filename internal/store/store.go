@@ -192,7 +192,7 @@ func (s *Store) Exec(ctx context.Context, query string, args ...any) (sql.Result
 //
 // IMMEDIATE takes the write lock up front. Every multi-statement write in pager
 // reads state and then writes a decision derived from it — the host-key
-// transfer here, and later the breaker count before an INSERT and the candidate
+// transfer here, the idle-loop decision after an INSERT and the candidate
 // re-validation before a claim. A deferred transaction would take the lock only
 // at the first write, by which point the read it was based on may no longer
 // hold.

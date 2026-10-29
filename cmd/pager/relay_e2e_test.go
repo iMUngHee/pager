@@ -357,10 +357,11 @@ func TestRelayCarriesHopAcrossStores(t *testing.T) {
 
 	hookTurn(t, a, "sa")
 	on(t, a)
-	_, err := capture(t, "", "send", "--session", "sa", "kipa@vm", "q4")
-	if err == nil || !strings.Contains(err.Error(), "causal chain is too deep") {
-		t.Fatalf("fourth reply: err = %v, want the hop limit", err)
+	got, err := capture(t, "", "send", "--session", "sa", "kipa@vm", "q4")
+	if err != nil || !strings.Contains(got, "(hop 4, caused)") {
+		t.Fatalf("fourth reply: %s, error=%v", got, err)
 	}
+	round(t, a, "vm", b, "mac")
 }
 
 // TestFirstLineStopsAtAnyLineBreak: pager ls shows only a body's first line,

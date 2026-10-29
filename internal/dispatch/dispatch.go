@@ -19,6 +19,7 @@ import (
 
 // Request is one send as the sender expressed it.
 type Request struct {
+	deliver.Metadata
 	Target string // alias, session id, pm ref, fragment, or name@peer
 	Body   string
 	Sender string // resolved sending session; "" when unattributed
@@ -70,10 +71,14 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 		}
 		address := addr.Ref + "@" + addr.Peer
 		sent, err := deliver.Send(ctx, st, deliver.SendRequest{
-			Alias: address, Peer: addr.Peer, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
+			Metadata: req.Metadata,
+			Alias:    address, Peer: addr.Peer, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
 		})
 		if err != nil {
 			return Result{}, err
+		}
+		if sent.Existing {
+			return Result{Sent: sent, Address: address, Lines: []string{"note: event retry kept its original message ID and relay status"}}, nil
 		}
 		return Result{Sent: sent, Address: address, Lines: []string{
 			"queued for peer " + addr.Peer + "; it leaves when the relay next runs",
@@ -95,12 +100,24 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	}
 
 	sent, err := deliver.Send(ctx, st, deliver.SendRequest{
-		Alias: found.Alias, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
+		Metadata: req.Metadata,
+		Alias:    found.Alias, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
 	})
 	if err != nil {
 		return Result{}, err
 	}
 	res := Result{Sent: sent, Address: found.Alias}
+	if sent.Warning != "" {
+		res.Lines = append(res.Lines, "note: "+sent.Warning)
+	}
+	if sent.PauseReason != "" {
+		res.Lines = append(res.Lines, deliver.PauseSummary(sent.PauseReason)+"; report the pause to your operator rather than retrying")
+		return res, nil
+	}
+	if sent.Existing && sent.AlreadyRead {
+		res.Lines = append(res.Lines, "note: event was already recorded as read; no additional notification")
+		return res, nil
+	}
 
 	// Who is behind the name decides whether poking it means anything. A
 	// stranded holder cannot answer a poke, and telling the sender it "will be

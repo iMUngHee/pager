@@ -5,16 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
-	"time"
 
 	"github.com/iMUngHee/pager/internal/store"
 )
 
-// MaxHop is the deepest causal chain pager will carry. A reply to a reply to a
-// reply is already past the point where two agents are talking rather than
-// working.
-const MaxHop = 3
+// MaxHop bounds representation and overflow, not legitimate conversation length.
+const MaxHop = math.MaxInt32
 
 // Message origin values. The column survives its cause being pruned, so the
 // distinction outlives cause_id.
@@ -23,30 +21,14 @@ const (
 	OriginCaused = "caused"
 )
 
-// Circuit-breaker limits. These are the last line of defence, not the first:
-// --human is an operator assertion rather than a verified fact, so an automated
-// caller can always claim human origin and step outside the hop chain. What it
-// cannot step outside is a count.
-//
-// The values are estimates; no production signal informed them.
-const (
-	breakerWindow      = time.Hour
-	maxCausedPerSender = 20
-	maxCausedPerPair   = 10
-	maxHumanPerWindow  = 30
-)
-
 // Send refusals. Each is a policy decision, not a failure.
 var (
 	// ErrUnattributed is the fail-closed default: a send that cannot say which
 	// session it came from is refused rather than recorded anonymously.
 	ErrUnattributed = errors.New("no session context: pass --session, set PAGER_SESSION, or assert --human")
-	// ErrHopExceeded means the causal chain reached MaxHop. What it wraps names
-	// the remedy, because the reader is usually an agent deciding what to do
-	// next — see the message built at the refusal.
-	ErrHopExceeded = errors.New("causal chain is too deep")
-	// ErrBreakerOpen means a rate limit tripped.
-	ErrBreakerOpen = errors.New("send rate limit reached")
+	// ErrHopExceeded rejects unavailable or overflowing causal state; it is
+	// not a normal conversation-length quota.
+	ErrHopExceeded = errors.New("causal depth is unavailable or out of range")
 	// ErrBodyTooLarge refuses a remote send whose body would not fit the relay
 	// protocol. It is decided when the message is sent rather than when it
 	// leaves, because a message dropped after it had committed a sequence
@@ -76,6 +58,7 @@ const MaxRelayBody = 64 << 10
 // session most recently took delivery of, read inside the same transaction that
 // writes the message, so a caller cannot understate its own depth.
 type SendRequest struct {
+	Metadata
 	Alias  string // resolved target alias, or "name@peer" for a remote send
 	Peer   string // registered peer for a remote send; empty for local mail
 	Body   string
@@ -86,17 +69,18 @@ type SendRequest struct {
 
 // Sent reports what was written.
 type Sent struct {
-	ID     int64
-	Hop    int
-	Origin string
+	PauseReason string
+	Warning     string
+	Existing    bool
+	AlreadyRead bool
+	ID          int64
+	Hop         int
+	Origin      string
 }
 
-// Send writes one message, computing its causal depth and enforcing the limits
-// in the same transaction that inserts it.
-//
-// Reading the cause, deciding the depth, counting against the breaker and
-// inserting all happen under one write lock. Split apart, two concurrent sends
-// could each read a count of 19 and both proceed.
+// Send stores a validated message, its causal attribution and the optional
+// wake decision under one write lock. Event retries and idle-loop state are
+// serialized with the insert so concurrent requests observe one outcome.
 func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 	if strings.TrimSpace(req.Alias) == "" {
 		return Sent{}, errors.New("send: no target alias")
@@ -119,30 +103,42 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 		}
 	}
 
+	var err error
+	req.Metadata, err = req.Metadata.Normalized()
+	if err != nil {
+		return Sent{}, err
+	}
 	var out Sent
-	err := st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+	err = st.WriteTx(ctx, func(ctx context.Context, c *sql.Conn) error {
+		if req.EventID != "" {
+			var body, kind, progress, activity string
+			err := c.QueryRowContext(ctx, `SELECT id,hop,origin,wake_note,body,event_kind,progress,activity,
+              delivered_at IS NOT NULL OR listed_at IS NOT NULL FROM messages
+              WHERE COALESCE(sender_session,'')=? AND alias=? AND task=? AND event_id=? AND src_peer IS NULL`, req.Sender, req.Alias, req.Task, req.EventID).Scan(&out.ID, &out.Hop, &out.Origin, &out.PauseReason, &body, &kind, &progress, &activity, &out.AlreadyRead)
+			if err == nil {
+				if body != req.Body || kind != req.Kind || progress != req.Progress || activity != req.Activity {
+					return fmt.Errorf("event_id %q was already used with different content", req.EventID)
+				}
+				out.Existing = true
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		hop, origin, cause, err := causalDepth(ctx, c, req)
 		if err != nil {
 			return err
 		}
-		if hop > MaxHop {
-			// The remedy is spelled out because the reader is almost always an
-			// agent, and the count alone does not tell it what to do. Read as
-			// bare numbers this refusal looks like a bug in ordinary
-			// discussion, and it was reported as one: a session hit it, and
-			// told its operator pager was cutting normal technical exchange
-			// short. It is not — what is capped is a chain of agent replies
-			// with no person in it, which is the whole point of MaxHop, and the
-			// operator being told is the correct outcome rather than the
-			// symptom. Saying so is what turns a refusal into an instruction.
-			return fmt.Errorf(
-				"%w: hop %d exceeds the limit of %d — that many replies have passed with no person in them; "+
-					"report it to your user rather than retrying, since their next prompt starts a fresh chain, "+
-					"and --human is an operator's assertion rather than a way past this",
-				ErrHopExceeded, hop, MaxHop)
+		if hop < 0 || hop > MaxHop {
+			return fmt.Errorf("%w: cannot extend recorded hop %d (valid range 0..%d); report stale or damaged causal state to your user", ErrHopExceeded, hop, MaxHop)
 		}
-		if err := checkBreaker(ctx, c, st.Now(), req, origin); err != nil {
-			return err
+		var recipient string
+		if req.Peer == "" {
+			err := c.QueryRowContext(ctx, "SELECT COALESCE(session_id,'') FROM aliases WHERE alias=?", req.Alias).Scan(&recipient)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 
 		// A remote send takes the next number of the peer's current link
@@ -167,10 +163,10 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 
 		res, err := c.ExecContext(ctx, `
 			INSERT INTO messages(alias, sender_session, sender_label, body, hop, origin, cause_id, created_at,
-			                     dst_peer, dst_link, dst_seq)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			                     dst_peer, dst_link, dst_seq,task,event_kind,activity,progress,event_id,recipient_session)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			req.Alias, nullable(req.Sender), req.Label, req.Body, hop, origin, cause, st.Now(),
-			nullable(req.Peer), link, seq)
+			nullable(req.Peer), link, seq, req.Task, req.Kind, req.Activity, req.Progress, nullable(req.EventID), nullable(recipient))
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -179,6 +175,16 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			return fmt.Errorf("insert message: %w", err)
 		}
 		out = Sent{ID: id, Hop: hop, Origin: origin}
+		out.PauseReason, err = checkBreaker(ctx, c, st.Now(), req, recipient)
+		if err != nil {
+			out.PauseReason = ""
+			out.Warning = "loop check unavailable; automatic wake remains enabled: " + err.Error()
+		}
+		if out.PauseReason != "" {
+			if _, err := c.ExecContext(ctx, "UPDATE messages SET wake_note=? WHERE id=?", out.PauseReason, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return out, err
@@ -224,62 +230,6 @@ func causalDepth(ctx context.Context, c *sql.Conn, req SendRequest) (hop int, or
 		return 0, "", nil, fmt.Errorf("read cause depth: %w", err)
 	}
 	return causeHop + 1, OriginCaused, causeID.Int64, nil
-}
-
-// checkBreaker enforces the three send limits.
-//
-// Automatic traffic is bounded twice — per sender and per sender-recipient pair
-// — because one runaway conversation between two sessions is the failure mode,
-// and a per-sender limit alone would let it consume the whole budget.
-func checkBreaker(ctx context.Context, c *sql.Conn, now int64, req SendRequest, origin string) error {
-	since := now - breakerWindow.Milliseconds()
-
-	if origin == OriginCaused {
-		var perSender int
-		if err := c.QueryRowContext(ctx, `
-			SELECT count(*) FROM messages
-			 WHERE sender_session = ? AND cause_id IS NOT NULL AND created_at >= ?`,
-			req.Sender, since).Scan(&perSender); err != nil {
-			return fmt.Errorf("count automatic sends: %w", err)
-		}
-		if perSender >= maxCausedPerSender {
-			return fmt.Errorf("%w: %d automatic sends from this session in the last hour (limit %d)",
-				ErrBreakerOpen, perSender, maxCausedPerSender)
-		}
-
-		var perPair int
-		if err := c.QueryRowContext(ctx, `
-			SELECT count(*) FROM messages
-			 WHERE sender_session = ? AND alias = ? AND cause_id IS NOT NULL AND created_at >= ?`,
-			req.Sender, req.Alias, since).Scan(&perPair); err != nil {
-			return fmt.Errorf("count automatic sends to this alias: %w", err)
-		}
-		if perPair >= maxCausedPerPair {
-			return fmt.Errorf("%w: %d automatic sends to %q in the last hour (limit %d)",
-				ErrBreakerOpen, perPair, req.Alias, maxCausedPerPair)
-		}
-		return nil
-	}
-
-	// Everything without a cause shares one budget, including a session's own
-	// spontaneous sends. Such a send cannot itself be part of a loop — the
-	// reply it provokes is what carries a cause — so a coarse cap is enough.
-	//
-	// Rows imported from a peer also have no local cause, but they are not
-	// this store's sends: counting them would let another store's traffic use
-	// up the local operator's budget. They are bounded by the relay's own
-	// per-peer cap instead.
-	var human int
-	if err := c.QueryRowContext(ctx, `
-		SELECT count(*) FROM messages WHERE cause_id IS NULL AND src_peer IS NULL AND created_at >= ?`,
-		since).Scan(&human); err != nil {
-		return fmt.Errorf("count human sends: %w", err)
-	}
-	if human >= maxHumanPerWindow {
-		return fmt.Errorf("%w: %d human-origin sends in the last hour (limit %d)",
-			ErrBreakerOpen, human, maxHumanPerWindow)
-	}
-	return nil
 }
 
 // Confirmation is the outcome of confirming one claimed batch.

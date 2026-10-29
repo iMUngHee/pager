@@ -75,6 +75,11 @@ func (s *Server) register() {
 				mcp.Description("What to tell them. Long bodies are truncated on delivery.")),
 			mcp.WithString("label",
 				mcp.Description("How the recipient sees you. Defaults to your own alias.")),
+			mcp.WithString("task", mcp.Description("Optional stable task scope; different tasks do not share loop suspicion.")),
+			mcp.WithString("kind", mcp.Description("update (default), result, failure, or release. Genuine outcomes/errors/resource releases bypass wake pauses; acknowledgements remain update.")),
+			mcp.WithString("activity", mcp.Description("working if real work is ongoing; idle only when no work is running; unknown or omitted if uncertain. Missing signals never block. Both peers must affirm idle before a repeated exchange can pause.")),
+			mcp.WithString("progress", mcp.Description("Optional real tool/test/artifact checkpoint. Change it when work advances, not on every send or with timestamps. Identical text with new progress is allowed.")),
+			mcp.WithString("event_id", mcp.Description("Optional stable ID for retries of this same event. Reuse with identical content preserves the original message ID. Use a new ID for a new state transition.")),
 		),
 		s.handleSend,
 	)
@@ -153,6 +158,16 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	target, _ := args["target"].(string)
 	body, _ := args["body"].(string)
 	label, _ := args["label"].(string)
+	var meta deliver.Metadata
+	for name, dst := range map[string]*string{"task": &meta.Task, "kind": &meta.Kind, "activity": &meta.Activity, "progress": &meta.Progress, "event_id": &meta.EventID} {
+		if raw, ok := args[name]; ok {
+			v, valid := raw.(string)
+			if !valid {
+				return mcp.NewToolResultError(name + " must be a string"), nil
+			}
+			*dst = v
+		}
+	}
 	if strings.TrimSpace(target) == "" || strings.TrimSpace(body) == "" {
 		return mcp.NewToolResultError("target and body are both required"), nil
 	}
@@ -169,7 +184,8 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	// copied here, and the copies drifted precisely because one branch was
 	// unreachable and so nobody read either.
 	res, err := dispatch.Send(ctx, s.st, dispatch.Request{
-		Target: target, Body: body, Sender: sender, Label: label,
+		Metadata: meta,
+		Target:   target, Body: body, Sender: sender, Label: label,
 	})
 	if err != nil {
 		if res.Sent.ID != 0 {
@@ -256,6 +272,12 @@ func (s *Server) handleList(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		// that names the sender, as in hook delivery, however long the body.
 		lines := deliver.BodyLines(m.Body)
 		fmt.Fprintf(&sb, "#%d [%s] %s -> %s: %s\n", m.ID, m.State(), deliver.SanitizeLabel(m.Sender), m.Alias, lines[0])
+		if m.PauseReason != "" {
+			sb.WriteString("  " + deliver.PauseSummary(m.PauseReason) + "\n")
+		}
+		if m.Kind != "update" {
+			fmt.Fprintf(&sb, "  event: %s\n", m.Kind)
+		}
 		if line := deliver.ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
 			sb.WriteString("  " + line + "\n")
 		}

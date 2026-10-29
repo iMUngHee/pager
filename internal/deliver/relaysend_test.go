@@ -99,11 +99,11 @@ func TestOutboundRowNotDeliveredToLegacyAlias(t *testing.T) {
 	}
 }
 
-// TestImportsDoNotSpendHumanBudget checks that mail imported from another
+// TestLocalAndImportedRowsDoNotCreateGlobalQuota checks that mail imported from another
 // store is kept out of the store-wide human budget, which the local operator's
 // --human sends share. The control half shows the same rows without src_peer
 // do fill the budget, so the exclusion is what the result depends on.
-func TestImportsDoNotSpendHumanBudget(t *testing.T) {
+func TestLocalAndImportedRowsDoNotCreateGlobalQuota(t *testing.T) {
 	seed := func(t *testing.T, st *store.Store, srcPeer any) {
 		t.Helper()
 		for i := 0; i < maxHumanPerWindow; i++ {
@@ -116,11 +116,11 @@ func TestImportsDoNotSpendHumanBudget(t *testing.T) {
 		}
 	}
 
-	t.Run("local rows fill the budget", func(t *testing.T) {
+	t.Run("local rows do not limit sends", func(t *testing.T) {
 		st, _ := newStore(t)
 		seed(t, st, nil)
-		if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa", Body: "one more", Human: true}); !errors.Is(err, ErrBreakerOpen) {
-			t.Fatalf("send after %d local human rows: err = %v, want ErrBreakerOpen", maxHumanPerWindow, err)
+		if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa", Body: "one more", Human: true}); err != nil {
+			t.Fatalf("send after %d local human rows: err = %v, want acceptance past the former quota", maxHumanPerWindow, err)
 		}
 	})
 
@@ -195,15 +195,15 @@ func TestSendRefusesOversizedRemoteBody(t *testing.T) {
 		t.Errorf("a refused send wrote %d rows", n-before)
 	}
 
-	// A breaker refusal must not consume a number either.
+	// Crossing the former quota remains a valid send with the next sequence.
 	for i := messageCount(t, st); i < maxHumanPerWindow; i++ {
 		insertRaw(t, st, "filler", 0)
 	}
-	if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa@vm", Peer: "vm", Body: "over budget", Human: true}); !errors.Is(err, ErrBreakerOpen) {
-		t.Fatalf("send over the human budget: err = %v, want ErrBreakerOpen", err)
+	if _, err := Send(t.Context(), st, SendRequest{Alias: "kipa@vm", Peer: "vm", Body: "over budget", Human: true}); err != nil {
+		t.Fatalf("send over the human budget: err = %v, want acceptance past the former quota", err)
 	}
-	if got := outSeq(t, st, "vm"); got != 1 {
-		t.Errorf("out_seq = %d after a breaker refusal, want 1", got)
+	if got := outSeq(t, st, "vm"); got != 2 {
+		t.Errorf("out_seq = %d after another accepted send, want 2", got)
 	}
 }
 

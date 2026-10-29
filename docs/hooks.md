@@ -57,22 +57,15 @@ host's own message-injection path, so at the hook boundary it is
 rule, a single poke raised the recipient's `causal_epoch` and cleared
 `last_inbound_id`. Those are measured values — 4→5, 51→NULL.
 
-Both consequences were bad. A sender could remotely reset a recipient's causal
-state, something only the human at the receiving session could do until then;
-and with the causal representative gone, the recipient's next reply counted as
-hop 0 / `human`, billing against the `maxHumanPerWindow` budget (30) instead of
-`maxCausedPerPair` (10). That direction weakens the ping-pong defence.
+Synthetic wakes must not remotely reset the receiver's causal epoch or make
+an inherited reply look operator-initiated. Hop remains attribution data; the
+old hourly send budgets and three-hop cutoff have been removed. The epoch also
+resets loop suspicion when a genuine user prompt starts a new task.
 
-> This decision used to be the weakest link in the ping-pong defence. The
-> assumption written down was "if the host starts injecting synthetic prompts
-> when it resumes" — and wake made exactly that real. The sentinel condition
-> closes the hole. The remaining line of defence is still the breaker, which
-> does nothing but count.
-
-Imitating the sentinel to suppress a reset is possible, but **it works against
-the forger.** Suppressed means the reply keeps its causal depth and bills
-against the narrower budget — a strengthening, not a weakening, so there is no
-reason to abuse it.
+The sentinel keeps automatic waking from masquerading as human progress. It
+is not an authentication token or a traffic-budget bypass. The signal-based
+wake guard requires explicit fresh idle state from both peers plus a repeated,
+unchanged exchange; missing activity is unknown and never a reason to pause.
 
 ## Input fields
 

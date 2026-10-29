@@ -394,7 +394,7 @@ long as it does not reorder them:
 | `imported` | yes | Written to the recipient's inbox; the recipient is poked |
 | `duplicate` | yes | Already here — a resend, or one already imported |
 | `rejected` | yes | Cannot be delivered (no such alias, out-of-range hop, …); the sender gets a bounce |
-| `deferred` | no | Not now: a gap, or the per-peer cap (`retry_after_ms` says when) — the run stops |
+| `deferred` | no | Not now: an earlier link record is missing — the run stops; resend after filling the gap |
 | `refused` | no | The stream is wrong: wrong store, unknown or mismatched link, unsupported version, malformed line — the run stops |
 
 | Exit | Meaning | Transport should |
@@ -454,12 +454,11 @@ record, so upgrading one side first does not stall the other.
 
 ### What crosses, and what is capped
 
-- **The causal hop crosses with the message.** A reply to relayed mail sits one
-  deeper than it, so a chain of agent replies is capped at the same `MaxHop`
-  across stores as within one.
-- **Imported mail is not this store's sending.** It does not use the local
-  human budget, and is bounded instead by a per-peer cap of 60 imports an hour
-  (an estimate, like the other limits); past it, records are deferred, not lost.
+- **Causal attribution crosses with the message.** Hop depth is trace data,
+  not a three-reply budget. Extended events and long chains require v2 peers.
+- **Transport bounds remain structural.** Payload size, framing and outbound
+  batch limits remain; imports have no hourly traffic quota. Unknown remote
+  work signals never establish an idle loop.
 - **The recipient sees where it came from**, on a line pager writes itself —
   no label can produce or imitate it:
 
@@ -528,6 +527,8 @@ record, so upgrading one side first does not stall the other.
 | `PAGER_LEASE` | `2m` | How long a claim is held |
 | `PAGER_ARCHIVE` | on | `off` deletes without archiving. **Any value other than `off` is on** |
 | `PAGER_WAKE` | on | `off` does not knock — delivery depends on hooks alone, the older behaviour. **Any value other than `off` is on** |
+| `PAGER_LOOP_IDLE` | `2m` | Unchanged exchange duration before a confirmed-idle wake pause |
+| `PAGER_LOOP_SIGNAL_TTL` | `2m` | Maximum age of the peer's explicit idle signal; older is unknown |
 
 Leaving `PAGER_WAKE` on costs one directory read when no surface is available.
 
@@ -617,35 +618,55 @@ One limitation: bodies are text other agents wrote, and SQLite does not
 validate UTF-8. Invalid byte sequences are replaced with U+FFFD during
 encoding, so **losslessness holds only for valid UTF-8 bodies.**
 
-## `--human` is a declaration, not a check
+## Cooperative loops and important events
 
-`pager send --human` is **the caller's claim** that a human is sending this,
-and pager has no way to confirm it. An automated agent can attach it too, and
-doing so breaks the hop chain.
+Pager has no default hourly send quota or three-hop conversation cutoff. Hop
+and cause IDs remain attribution data; representation overflow or unreadable
+causal state is still an explicit error. `--human` is the caller's declaration
+of operator initiation, not authentication or a way to force a paused wake.
 
-So **the last line of defence is the breaker**, which does not read claims. It
-only counts.
+Mail is stored before the wake decision. An ordinary update pauses automatic
+waking only when both local peers explicitly report `activity=idle`, the peer's
+signal is fresh, and the same two-way bodies and progress checkpoints remain
+unchanged for `PAGER_LOOP_IDLE` (default 2 minutes). A changed body/checkpoint,
+working or unknown activity, a different task, stale signals, or a new human
+causal epoch resets suspicion. There is no total-message counter.
 
-| Limit | Default |
-| --- | --- |
-| automated sends / session / hour | 20 |
-| automated sends / inbox pair / hour | 10 |
-| uncaused sends (including `--human`) / hour | 30 |
+Signals are optional reports, not verified semantic progress. Omitted activity
+means unknown and never establishes a stalled job. Existing wrappers keep
+working unchanged. Use `working` while a real job is running; only affirm `idle`
+when it is not. A progress checkpoint can describe a changed test result or an
+artifact revision; do not fabricate a new token or timestamp on every send.
+This conservative guard cannot detect every loop, especially without signals;
+the calling workflow still owns its goal and termination conditions.
 
-Hop depth guards ping-pong as well. A send caused by a received message is one
-deeper, and past 3 it is refused. **A user prompt breaks the chain** — which is
-why ordinary back-and-forth work never accumulates depth.
+`kind=result`, `failure`, and `release` are important state events. They bypass
+wake pauses and take priority over ordinary updates in the next hook batch,
+so a resource release is not buried behind a paused backlog. Acknowledgements
+remain ordinary `update` messages. Optional stable `event_id` (`--event` in the
+CLI) makes retries return the original ID, while conflicting reuse is refused.
+A retry of an unread event can repair its wake; one recorded as read is not
+woken again. Event IDs and priority declarations are not authentication.
 
-When refused, the thing to do is **raise it to the user**. Retrying gives the
-same answer, and `--human` is a human's declaration, not a bypass. Being
-blocked is itself information: it means agents went four steps without a human,
-and a human knowing that is the point of the limit. The error text says all
-three of these.
+```sh
+pager send vige "GPU released after application exit" --session "$SESSION_ID" \
+  --task gpu-job --kind release --activity idle --event gpu-job-release
+```
 
-There are two ways back to a shallow chain: a user prompt, and **receiving a
-shallower message.** The causal representative is overwritten by the batch's
-maximum depth rather than taking the max with the existing value, so a hop-0
-message arriving after a deep chain ends returns the next send to hop 1.
+MCP `msg_send` accepts the same optional `task`, `kind`, `activity`, `progress`
+and `event_id` fields. A paused receipt explicitly says the mail is stored but
+the recipient was not automatically woken: report it to the operator rather
+than retrying the same exchange. The recipient sees the recorded pause reason
+on its next read or normal hook delivery; manual reads remain available. A
+pause never deletes mail or claims that the recipient acted.
+
+Relay v2 carries these semantic event fields and long causal chains. Basic
+messages with default metadata and hop 0..3 still use v1, and replies use the
+request's compatible version. Upgrade both peers for extended events/long
+chains; an older peer refuses unsupported v2 while the sender retains pending
+mail. Remote work state is not inferred: unknown observation fails open. The
+old 60-imports/hour quota is removed; payload/framing and outbound batch bounds
+remain.
 
 ## Trust boundary
 
@@ -702,3 +723,14 @@ A tmux status badge and an overlay TUI are later steps.
 - [session-binding.md](session-binding.md) — CLI resolution tiers, MCP request identity, host
   detection, isolation rules
 - [hooks.md](hooks.md) — event / input / output matrix, the fail-open contract
+
+### Native loop regression smoke test
+
+Run `python scripts/codex-loop-smoke.py --pager /path/to/pager --codex /path/to/codex`.
+It creates two persisted native Codex threads in an isolated temporary home, uses
+a local deterministic Responses provider, and exercises real shell/MCP tools and
+queue execution without cloud model calls. Normal work changes an actual file;
+idle exchanges stop waking; a resource-release event bypasses the pause and is
+deduplicated on retry. The script requires experimental queue APIs and namespaced
+MCP calls (tested with Codex 0.165.0-alpha.1.2). It retains its temporary evidence.
+Windows was run natively; macOS/Linux execution remains pending.

@@ -174,6 +174,7 @@ func TestMigrationsAreAppendOnly(t *testing.T) {
 		"8b11f1573b1ecc6b99fd42ea5ae1dd367c4bcc7e49bf546615c5ae4e471ce802", // 1 -> 2 (listed_at)
 		"fa2044e78bcdadaa98616e6bea55f78f2e27910d4497ff96dbdf2b2dcc345747", // 2 -> 3 (purpose)
 		"9c304fea494ce99599800273d411ff86bc2bd3a5f922f41ec550701d0e0e2cb1", // 3 -> 4 (relay)
+		"fe335b8d5e1f59edc959e1b0ef5298ed89443319ef744f157616b241929b1725", // 4 -> 5 (cooperative loop metadata)
 	}
 	if len(want) != len(migrations) {
 		t.Fatalf("%d migrations but %d digests — append the new entry's digest", len(migrations), len(want))
@@ -511,7 +512,7 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	// Five entries, joined at 1: four run, and the version recorded must be 5 —
+	// Six entries, joined at 1: five run, and the version recorded must be 6 —
 	// the length of what ran, not schemaVersion.
 	//
 	// The list grows whenever a real migration lands, because its whole job is
@@ -525,6 +526,7 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 		`ALTER TABLE messages ADD COLUMN probe_only INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only_too INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only_three INTEGER`,
+		`ALTER TABLE messages ADD COLUMN probe_only_four INTEGER`,
 	}
 	if len(longer) == schemaVersion {
 		t.Fatalf("the fixture list is %d long, the same as schemaVersion — it cannot tell them apart", len(longer))

@@ -10,8 +10,8 @@
 // The receiving store keeps one high-water mark per link, which is what makes
 // a repeated line a duplicate rather than a second copy, and a missing one a
 // gap the receiver waits on rather than skips. The causal hop a message
-// carried in its own store comes along, so a chain of agent replies is capped
-// across stores exactly as it is within one.
+// carried in its own store comes along as trace data, not a reply quota.
+// Unknown remote work state never establishes an idle loop.
 package relay
 
 import (
@@ -32,10 +32,10 @@ import (
 	"github.com/iMUngHee/pager/internal/wake"
 )
 
-// Version is the highest protocol version this binary reads and the one it
-// writes. A field that changes what a receiver must do is a new version, even
+// Version is the highest protocol version this binary reads. Writers use the
+// lowest version that expresses the record. A field that changes what a receiver must do is a new version, even
 // when it is only added; purely descriptive additions are not.
-const Version = 1
+const Version = 2
 
 // Kinds of line. "roster" is reserved for a later version.
 const (
@@ -56,15 +56,6 @@ const (
 const (
 	DefaultLimit = 100
 	MaxLimit     = 1000
-)
-
-// Inbound cap: imports accepted from one peer per window. It bounds what
-// another store can push in, now that imports are kept out of the local human
-// budget. The value is an estimate, like the breaker's, and hitting it only
-// delays mail — the run stops and the transport retries later.
-const (
-	inboundWindow  = time.Hour
-	maxInboundPeer = 60
 )
 
 // maxFrom bounds a reply address taken from another store.
@@ -96,6 +87,7 @@ type Ident struct {
 
 // Record is one message on its way to another store.
 type Record struct {
+	deliver.Metadata
 	V        int     `json:"v"`
 	Kind     string  `json:"kind"`
 	Link     Link    `json:"link"`
@@ -212,7 +204,7 @@ func Out(ctx context.Context, st *store.Store, peer string, limit int, w io.Writ
 		}
 
 		rows, err := c.QueryContext(ctx, `
-			SELECT id, alias, COALESCE(sender_session, ''), sender_label, body, hop, created_at, dst_link, dst_seq
+			SELECT id, alias, COALESCE(sender_session, ''), sender_label, body, hop, created_at, dst_link, dst_seq,task,event_kind,activity,progress,COALESCE(event_id,'')
 			  FROM messages
 			 WHERE dst_peer = ? AND relayed_at IS NULL
 			 ORDER BY dst_seq
@@ -230,11 +222,20 @@ func Out(ctx context.Context, st *store.Store, peer string, limit int, w io.Writ
 			var alias string
 			var created int64
 			if err := rows.Scan(&r.rec.Origin.ID, &alias, &r.sender, &r.rec.Label, &r.rec.Body,
-				&r.rec.Hop, &created, &r.rec.Link.ID, &r.rec.Link.Seq); err != nil {
+				&r.rec.Hop, &created, &r.rec.Link.ID, &r.rec.Link.Seq, &r.rec.Task, &r.rec.Metadata.Kind, &r.rec.Activity, &r.rec.Progress, &r.rec.EventID); err != nil {
 				rows.Close()
 				return fmt.Errorf("read outbound mail: %w", err)
 			}
-			r.rec.V, r.rec.Kind = Version, kindMsg
+			r.rec.V, r.rec.Kind = 1, kindMsg
+			if r.rec.Metadata.IsPagerMetadata() || r.rec.Hop > 3 {
+				r.rec.V = Version
+			}
+			if r.rec.Metadata.Kind == "update" {
+				r.rec.Metadata.Kind = ""
+			}
+			if r.rec.Activity == "unknown" {
+				r.rec.Activity = ""
+			}
 			r.rec.Link.Store, r.rec.Origin.Store, r.rec.DstStore = own, own, p.storeID
 			r.rec.To = strings.TrimSuffix(alias, "@"+name)
 			r.rec.SentAt = time.UnixMilli(created).UTC().Format(relayTime)
@@ -405,7 +406,7 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 		if err != nil {
 			return err
 		}
-		res = Result{V: Version, Kind: kindResult, Store: own, MaxV: Version, Link: rec.Link, OriginID: rec.Origin.ID}
+		res = Result{V: min(max(rec.V, 1), Version), Kind: kindResult, Store: own, MaxV: Version, Link: rec.Link, OriginID: rec.Origin.ID}
 		answer := func(status, reason string) error {
 			res.Status, res.Reason = status, reason
 			return nil
@@ -522,19 +523,6 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 		}
 
 		now := st.Now()
-		since := now - inboundWindow.Milliseconds()
-		var recent int
-		var oldest sql.NullInt64
-		if err := c.QueryRowContext(ctx,
-			"SELECT count(*), min(created_at) FROM messages WHERE src_peer = ? AND created_at >= ?",
-			peer, since).Scan(&recent, &oldest); err != nil {
-			return fmt.Errorf("count imports: %w", err)
-		}
-		if recent >= maxInboundPeer {
-			stop = true
-			res.RetryAfterMS = max(oldest.Int64+inboundWindow.Milliseconds()-now, 1)
-			return answer(StatusDeferred, fmt.Sprintf("rate: %d imports from %s in the last hour (limit %d)", recent, peer, maxInboundPeer))
-		}
 
 		var holder string
 		target := strings.TrimSpace(rec.To)
@@ -561,13 +549,24 @@ func importOne(ctx context.Context, st *store.Store, peer string, rec Record) (R
 			return reject(reason)
 		}
 
+		meta, metaErr := rec.Metadata.Normalized()
+		if metaErr != nil {
+			return reject(metaErr.Error())
+		}
+		if rec.V == 1 && (rec.Hop > 3 || rec.Metadata.IsPagerMetadata()) {
+			return reject("extended event metadata or hop depth requires protocol v2")
+		}
+		var eventID any
+		if meta.EventID != "" {
+			eventID = meta.EventID
+		}
 		label := deliver.SanitizeLabel(rec.Label)
 		if _, err := c.ExecContext(ctx, `
 			INSERT INTO messages(alias, sender_session, sender_label, body, hop, origin, cause_id, created_at,
-			                     src_peer, src_store, src_id, src_from)
-			VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+			                     src_peer, src_store, src_id, src_from,task,event_kind,activity,progress,event_id,recipient_session)
+			VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			target, label, rec.Body, rec.Hop, deliver.OriginHuman, now,
-			peer, rec.Origin.Store, rec.Origin.ID, normalizeFrom(rec.From)); err != nil {
+			peer, rec.Origin.Store, rec.Origin.ID, normalizeFrom(rec.From), meta.Task, meta.Kind, meta.Activity, meta.Progress, eventID, holder); err != nil {
 			return fmt.Errorf("import message: %w", err)
 		}
 		if err := advance(); err != nil {

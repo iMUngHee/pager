@@ -14,9 +14,11 @@ import (
 
 // Listed is one row of `pager ls`.
 type Listed struct {
-	ID     int64
-	Alias  string
-	Sender string
+	Metadata
+	PauseReason string
+	ID          int64
+	Alias       string
+	Sender      string
 	// SrcPeer and SrcFrom mark mail imported from another store, as on Pending.
 	SrcPeer   string
 	SrcFrom   string
@@ -126,7 +128,8 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 	query := `
 		SELECT m.id, m.alias, COALESCE(m.sender_label, ''), COALESCE(m.src_peer, ''), COALESCE(m.src_from, ''),
 		       m.body, m.hop, m.created_at,
-		       m.delivered_at IS NOT NULL, m.listed_at IS NOT NULL, m.created_at < ?
+		       m.delivered_at IS NOT NULL, m.listed_at IS NOT NULL, m.created_at < ?,
+		       m.task,m.event_kind,m.activity,m.progress,COALESCE(m.event_id,''),m.wake_note
 		  FROM messages m JOIN aliases a ON a.alias = m.alias AND m.dst_peer IS NULL
 		 WHERE a.session_id = ?`
 	args := []any{windowStart, session}
@@ -149,7 +152,7 @@ func List(ctx context.Context, st *store.Store, session string, f Filter, lim Li
 	for rows.Next() {
 		var l Listed
 		if err := rows.Scan(&l.ID, &l.Alias, &l.Sender, &l.SrcPeer, &l.SrcFrom, &l.Body, &l.Hop, &l.CreatedAt,
-			&l.Delivered, &l.Seen, &l.Expired); err != nil {
+			&l.Delivered, &l.Seen, &l.Expired, &l.Task, &l.Kind, &l.Activity, &l.Progress, &l.EventID, &l.PauseReason); err != nil {
 			return nil, fmt.Errorf("list messages: %w", err)
 		}
 		out = append(out, l)

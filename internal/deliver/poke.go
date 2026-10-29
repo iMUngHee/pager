@@ -11,15 +11,15 @@ import "strings"
 // matters because a user prompt ends the preceding exchange and resets the
 // session's causal epoch. Letting a poke do that would hand the sender control
 // of the recipient's causal state, and would drop the recipient's inbound
-// pointer so its next reply is billed as human-origin rather than caused.
+// pointer so its next reply loses its causal attribution.
 //
 // The sentinel travels in the poke body and hookio checks for it. It lives here
 // rather than in the wake package so the hook can recognise a poke without
 // depending on the code that sends one.
 //
 // Spoofing it is possible and uninteresting: suppressing the reset keeps the
-// recipient's replies at their real causal depth, which charges them against
-// the tighter per-pair budget. Imitating the marker costs the imitator.
+// recipient's replies at their real causal depth and preserves the epochs
+// used to identify a repeated idle exchange.
 const PokeSentinel = "[pager-poke]"
 
 // PokeRecoveryHint is shared by the sender and the hook's standalone-poke

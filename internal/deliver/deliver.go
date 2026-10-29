@@ -32,6 +32,12 @@ func Render(b Batch) string {
 			sender = "unknown sender"
 		}
 		fmt.Fprintf(&sb, "\n[#%d] from %s\n", m.ID, sender)
+		if m.Kind != "" && m.Kind != "update" {
+			fmt.Fprintf(&sb, "  event: %s\n", m.Kind)
+		}
+		if m.PauseReason != "" {
+			sb.WriteString("  " + PauseSummary(m.PauseReason) + "\n")
+		}
 		if line := ProvenanceLine(m.SrcPeer, m.SrcFrom); line != "" {
 			sb.WriteString("  " + line + "\n")
 		}
