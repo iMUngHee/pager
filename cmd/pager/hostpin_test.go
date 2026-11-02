@@ -20,6 +20,11 @@ import (
 // send now reaches for the surrounding host's sessions and can connect to a
 // live one. A test that woke a real session would be writing into someone's
 // conversation to check its own bookkeeping.
+//
+// With asPager set, this binary is pager itself: it runs main on its own
+// arguments instead of the tests. A test that needs pager as a separate
+// process starts this binary that way (see TestRelayWaitProcess). The pins
+// come first, so they hold in that process too.
 func TestMain(m *testing.M) {
 	if os.Getenv("PAGER_CLIENT") == "" {
 		os.Setenv("PAGER_CLIENT", "none")
@@ -27,8 +32,15 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PAGER_WAKE") == "" {
 		os.Setenv("PAGER_WAKE", "off")
 	}
+	if os.Getenv(asPager) == "1" {
+		main()
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
+
+// asPager is the variable that makes this test binary run as pager.
+const asPager = "PAGER_TEST_AS_PAGER"
 
 // TestAmbientDetectionIsPinnedOff guards the TestMain above; deleting it must
 // break something. The environment check is what catches a missing pin in CI,

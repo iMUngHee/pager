@@ -5,11 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"slices"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/iMUngHee/pager/internal/deliver"
 	"github.com/iMUngHee/pager/internal/relay"
@@ -121,8 +123,9 @@ func peerCmd(args []string) error {
 // itself never opens a connection.
 func relayCmd(args []string) error {
 	if len(args) == 0 {
-		return usageError("usage: pager relay id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>")
+		return usageError("usage: pager relay id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p> | wait --peer <p> [--timeout d]")
 	}
+	start := time.Now()
 
 	// A transport that stops reading closes the pipe under us. Ignoring
 	// SIGPIPE turns that into a write error, which the commands treat as
@@ -138,6 +141,7 @@ func relayCmd(args []string) error {
 	peer := fs.String("peer", "", "the peer this stream goes to or comes from")
 	limit := fs.Int("limit", relay.DefaultLimit, fmt.Sprintf("most records to emit (1-%d)", relay.MaxLimit))
 	force := fs.Bool("force", false, "new-id: cancel mail still waiting for peers, telling each sender")
+	timeout := fs.Duration("timeout", relay.DefaultWait, fmt.Sprintf("wait: longest to wait (%v-%v)", relay.MinWait, relay.MaxWait))
 	if err := fs.Parse(permute(fs, args[1:])); err != nil {
 		return usageError(err.Error())
 	}
@@ -148,6 +152,7 @@ func relayCmd(args []string) error {
 	// subcommand is refused rather than quietly ignored.
 	takes := map[string][]string{
 		"id": nil, "new-id": {"force"}, "out": {"peer", "limit"}, "in": {"peer"}, "ack": {"peer"},
+		"wait": {"peer", "timeout"},
 	}
 	allowed, known := takes[sub]
 	if !known {
@@ -164,6 +169,9 @@ func relayCmd(args []string) error {
 	}
 	if slices.Contains(allowed, "peer") && *peer == "" {
 		return usageError(fmt.Sprintf("relay %s needs --peer", sub))
+	}
+	if *timeout < relay.MinWait || *timeout > relay.MaxWait {
+		return usageError(fmt.Sprintf("--timeout must be between %v and %v (got %v)", relay.MinWait, relay.MaxWait, *timeout))
 	}
 
 	st, err := openStore(ctx)
@@ -199,6 +207,13 @@ func relayCmd(args []string) error {
 		return relay.In(ctx, st, *peer, os.Stdin, os.Stdout, os.Stderr)
 	case "ack":
 		return relay.Ack(ctx, st, *peer, os.Stdin, os.Stderr)
+	case "wait":
+		// The transport holds stdin open for as long as it wants the answer;
+		// stdin closing (ssh gone, transport stopped) ends the wait.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func(in io.Reader) { _, _ = io.Copy(io.Discard, in); cancel() }(os.Stdin)
+		return relay.Wait(ctx, st, *peer, start.Add(*timeout), os.Stdout)
 	}
 	return usageError(fmt.Sprintf("unknown relay subcommand %q", sub))
 }

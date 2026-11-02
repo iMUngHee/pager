@@ -159,6 +159,7 @@ pager relay new-id [--force]             # 이 저장소에 새 id (백업에서
 pager relay out --peer vm                # transport 쪽: 나갈 차례인 레코드
 pager relay in --peer laptop             # transport 쪽: 레코드를 수입하고 결과를 낸다
 pager relay ack --peer vm                # transport 쪽: 결과를 반영한다
+pager relay wait --peer vm               # transport 쪽: 나갈 메일이 생길 때까지 기다린다
 ```
 
 **"챙겼다"는 두 가지를 함께 뜻한다.** 훅이 메시지를 세션 컨텍스트에 주입했거나(STATE `delivered`),
@@ -334,8 +335,9 @@ ssh는 예시일 뿐이고, 줄을 옮길 수 있으면 무엇이든 된다. pag
 | 2 | 프로토콜이나 구성 문제(`refused`, 등록되지 않은 `--peer`, 사용법) | 멈추고 사람에게 알린다 |
 | 3 | 줄 중간에서 입력이 끝남(잘린 스트림) | 그 바퀴를 다시 돈다. 잘린 줄은 아무 효과가 없었다 |
 
-이 코드는 `relay out`, `relay in`, `relay ack`의 것이다. 나머지 `peer`·`relay` 명령은 사용법을 틀렸을
-때만 2로 끝나고, 아직 나갈 메일이 남은 `relay new-id` 같은 거부는 1로 끝난다.
+이 코드는 `relay out`, `relay in`, `relay ack`의 것이고, `relay wait`의 코드는 아래에 따로 있다. 나머지
+`peer`·`relay` 명령은 사용법을 틀렸을 때만 2로 끝나고, 아직 나갈 메일이 남은 `relay new-id` 같은 거부는
+1로 끝난다.
 
 transport는 또한:
 
@@ -345,6 +347,37 @@ transport는 또한:
 - 명령의 stdin에 쓰는 동안 stdout도 읽어야 한다. 그래야 파이프 버퍼(Windows에서는 작다) 때문에
   교착되지 않는다.
 - `relay in`이 일찍 읽기를 멈춰서 `relay out`이 쓰기 오류로 끝나는 것을 실패로 세지 않는다.
+
+### 메일 기다리기
+
+다른 저장소에 명령을 실행해서만 닿는 transport(ssh처럼)는, 기다리는 것이 있는지 알려면 poll 주기마다
+거기서 `relay out`을 실행해야 한다. `relay wait`를 쓰면 대신 명령 하나를 열어 둔 채로 기다릴 수 있다:
+
+```bash
+ssh vm pager relay wait --peer laptop    # ready 또는 timeout을 출력한다
+```
+
+1초에 한 번, 인덱스 조회 하나로 그 peer 앞으로 나갈 메일이 있는지 확인한다. 그리고 LF로 끝나는 줄 하나를
+출력한다: 메일이 생기는 즉시 `ready`, `--timeout`(Go duration, 1s–1h, 기본 5m, 시작한 때부터 잰다)이 먼저
+지나면 `timeout`. 이 답은 참고용이다: 무엇을 보낼지는 여전히 `relay out`이 정한다.
+
+| exit | 뜻 | transport가 할 일 |
+| --- | --- | --- |
+| 0 | `ready` 또는 `timeout` — stdin이 닫히거나 SIGINT·SIGTERM이 먼저 오면 아무것도 출력하지 않는다 | 어느 답이든 한 바퀴를 돈다 |
+| 1 | 저장소를 읽지 못함 | 나중에 다시 |
+| 2 | 사용법, 또는 등록되지 않은 `--peer`(기다리는 도중 지워진 peer 포함) | `relay out`으로 poll을 계속한다(아래) |
+
+이것을 쓰는 transport는:
+
+- 답을 원하는 동안 **stdin을 열어 둔다**. stdin이 닫히는 것(ssh가 끊김, transport가 멈춤)이 wait가 듣는
+  쪽이 없어졌음을 아는 방법이고, 그러면 조용히 끝난다. stdin이 처음부터 파일 끝인 채로(`</dev/null`,
+  `ssh -n`) 시작한 wait는 기다리지 않고 바로 끝난다.
+- **남긴 것이 없는 바퀴 뒤에만** 기다린다: `relay out`이 아무것도 내지 않았거나, 낸 레코드가 모두 최종
+  결과를 받아 `relay ack`가 반영한 바퀴다. 상대 저장소가 deferred로 답한 메일은 여전히 나갈 차례라서 wait는
+  그것에 바로 `ready`라고 답하고, 그런 바퀴 뒤에 기다리면 헛돈다.
+- **wait의 exit 2는 "여기서는 쓸 수 없음"으로 읽고** poll을 계속한다. wait가 없는 더 오래된 pager는 2로
+  끝난다 — `unknown relay subcommand`, 또는 `--timeout`에 대해 `flag provided but not defined`. 진짜 구성
+  문제는 바퀴에서 여전히 드러난다.
 
 ### 레코드
 

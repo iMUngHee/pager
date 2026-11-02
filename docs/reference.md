@@ -190,6 +190,7 @@ pager relay new-id [--force]       # give this store a new id (after a restore f
 pager relay out --peer vm          # transport side: records waiting to leave
 pager relay in --peer laptop       # transport side: import records, print results
 pager relay ack --peer vm          # transport side: apply results
+pager relay wait --peer vm         # transport side: wait until mail is ready to leave
 ```
 
 **"Picked up" means two things at once.** Either a hook injected the message
@@ -404,9 +405,9 @@ long as it does not reorder them:
 | 2 | Protocol or configuration problem (`refused`, a `--peer` that is not registered, usage) | Stop and tell a person |
 | 3 | Input ended inside a line (cut stream) | Retry the round; the cut line had no effect |
 
-These codes belong to `relay out`, `relay in` and `relay ack`. The other `peer`
-and `relay` commands exit 2 only for a usage mistake; a refusal such as
-`relay new-id` with mail still waiting exits 1.
+These codes belong to `relay out`, `relay in` and `relay ack`; `relay wait` has
+its own, below. The other `peer` and `relay` commands exit 2 only for a usage
+mistake; a refusal such as `relay new-id` with mail still waiting exits 1.
 
 A transport should also:
 
@@ -417,6 +418,43 @@ A transport should also:
   on Windows — cannot deadlock;
 - not count it as a failure when `relay out` exits with a write error because
   `relay in` stopped reading early.
+
+### Waiting for mail
+
+A transport that reaches the other store only by running commands on it, as
+over ssh, would otherwise run `relay out` there every poll interval to learn
+whether anything is waiting. `relay wait` lets it hold one command open instead:
+
+```bash
+ssh vm pager relay wait --peer laptop    # prints ready, or timeout
+```
+
+Once a second it checks, with one indexed lookup, whether mail for the peer is
+waiting to leave. It prints one LF-terminated line: `ready` as soon as some is,
+or `timeout` once `--timeout` has passed (a Go duration, 1s–1h, default 5m,
+counted from the start). The answer is advisory: `relay out` still decides what
+is sent.
+
+| Exit | Meaning | Transport should |
+| --- | --- | --- |
+| 0 | `ready` or `timeout` — or nothing, when stdin closed or SIGINT/SIGTERM came first | Run a round after either answer |
+| 1 | The store could not be read | Retry later |
+| 2 | Usage, or a `--peer` that is not registered, including one removed during the wait | Keep polling with `relay out` (below) |
+
+A transport that uses it should:
+
+- keep **stdin open** for as long as it wants the answer. stdin closing — ssh
+  gone, transport stopped — is how wait learns nobody is listening, and it ends
+  quietly. A wait started with stdin already at end of file (`</dev/null`,
+  `ssh -n`) ends at once without waiting;
+- wait only **after a round that left nothing behind**: `relay out` emitted
+  nothing, or every record it emitted got a final result that `relay ack`
+  applied. Mail the other store deferred is still waiting to leave, so wait
+  answers `ready` for it at once, and waiting after such a round would spin;
+- read **exit 2 from wait as "not available here"** and keep polling. A pager
+  older than wait exits 2 for it — `unknown relay subcommand`, or `flag provided
+  but not defined` for `--timeout` — and a real configuration problem still
+  shows up in the rounds.
 
 ### Records
 

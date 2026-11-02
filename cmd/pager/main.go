@@ -50,7 +50,7 @@ var commands = []command{
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", serveMCP},
 	{"peer", "add <name> --store <id> | ls | rm <name> [--force] | rebind <name> --store <id>", "Manage the stores this one relays with", peerCmd},
-	{"relay", "id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p>", "Move messages between stores over any transport", relayCmd},
+	{"relay", "id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p> | wait --peer <p> [--timeout d]", "Move messages between stores over any transport", relayCmd},
 }
 
 // openStore opens the standard database with the real clock.

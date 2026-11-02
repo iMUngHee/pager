@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/iMUngHee/pager/internal/clock"
 	"github.com/iMUngHee/pager/internal/relay"
@@ -431,10 +438,177 @@ func TestRelayCommandsRefuseFlagsTheyDoNotTake(t *testing.T) {
 		{"relay", "in", "--peer", "vm", "--limit", "5"},
 		{"relay", "new-id", "--peer", "vm"},
 		{"relay", "ack", "--peer", "vm", "--limit", "5"},
+		{"relay", "wait", "--peer", "vm", "--limit", "5"},
+		{"relay", "out", "--peer", "vm", "--timeout", "1m"},
+		{"relay", "in", "--peer", "vm", "--timeout", "1m"},
+		{"relay", "ack", "--peer", "vm", "--timeout", "1m"},
+		{"relay", "wait"},
 		{"relay", "bogus", "--peer", "vm"},
 	} {
 		if _, err := capture(t, "", args...); exitOf(err) != 2 {
 			t.Errorf("pager %s: exit %d (%v), want 2", strings.Join(args, " "), exitOf(err), err)
+		}
+	}
+}
+
+// TestRelayWaitRefusesBadTimeouts: --timeout takes a Go duration from 1s to 1h,
+// and anything else is a usage error, exit 2, given before the store is even
+// opened. Both ends of the range are accepted.
+func TestRelayWaitRefusesBadTimeouts(t *testing.T) {
+	never := filepath.Join(t.TempDir(), "never.db")
+	on(t, never)
+	for _, bad := range []string{"0", "500ms", "999ms", "2h", "1h0m1s", "-1s", "soon"} {
+		if _, err := capture(t, "", "relay", "wait", "--peer", "vm", "--timeout", bad); exitOf(err) != 2 {
+			t.Errorf("--timeout %s: exit %d (%v), want 2", bad, exitOf(err), err)
+		}
+	}
+	if _, err := os.Stat(never); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused --timeout still opened the store: stat = %v", err)
+	}
+
+	// Accepted, they wait; stdin at end of file ends the wait at once, with
+	// no line since no mail is waiting.
+	a, _ := relayPair(t)
+	on(t, a)
+	for _, good := range []string{"1s", "1h"} {
+		got, err := capture(t, "", "relay", "wait", "--peer", "vm", "--timeout", good)
+		if err != nil || got != "" {
+			t.Errorf("--timeout %s: %q, %v; want no output and exit 0", good, got, err)
+		}
+	}
+}
+
+// pagerProc is pager running as a process of its own: this test binary, which
+// TestMain turns into pager, with stdin a pipe the test holds open.
+type pagerProc struct {
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout, stderr bytes.Buffer
+	done           chan error
+	exited         bool
+}
+
+func startPager(t *testing.T, db string, args ...string) *pagerProc {
+	t.Helper()
+	p := &pagerProc{done: make(chan error, 1)}
+	p.cmd = exec.Command(os.Args[0], args...)
+	p.cmd.Env = append(os.Environ(), "PAGER_DB="+db, asPager+"=1")
+	p.cmd.Stdout, p.cmd.Stderr = &p.stdout, &p.stderr
+	in, err := p.cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	p.stdin = in
+	if err := p.cmd.Start(); err != nil {
+		t.Fatalf("start pager %s: %v", strings.Join(args, " "), err)
+	}
+	go func() { p.done <- p.cmd.Wait() }()
+	t.Cleanup(func() {
+		if !p.exited {
+			_ = p.cmd.Process.Kill()
+			<-p.done
+		}
+	})
+	return p
+}
+
+// result waits at most within for the process to end, and gives its stdout
+// and exit status.
+func (p *pagerProc) result(t *testing.T, within time.Duration) (string, int) {
+	t.Helper()
+	select {
+	case err := <-p.done:
+		p.exited = true
+		var ee *exec.ExitError
+		switch {
+		case err == nil:
+			return p.stdout.String(), 0
+		case errors.As(err, &ee):
+			return p.stdout.String(), ee.ExitCode()
+		}
+		t.Fatalf("pager: %v", err)
+	case <-time.After(within):
+		t.Fatalf("pager still running after %v; stderr:\n%s", within, p.stderr.String())
+	}
+	return "", -1
+}
+
+// running fails the test if the process has already ended.
+func (p *pagerProc) running(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-p.done:
+		p.exited = true
+		t.Fatalf("pager ended early (%v); stdout %q, stderr:\n%s", err, p.stdout.String(), p.stderr.String())
+	default:
+	}
+}
+
+// TestRelayWaitProcess runs relay wait the way a transport does: as a process
+// of its own, with stdin held open for as long as it wants the answer.
+func TestRelayWaitProcess(t *testing.T) {
+	wait := []string{"relay", "wait", "--peer", "vm"}
+
+	t.Run("mail sent by another process gives ready", func(t *testing.T) {
+		a, _ := relayPair(t)
+		on(t, a)
+		p := startPager(t, a, wait...)
+		time.Sleep(1500 * time.Millisecond)
+		p.running(t)
+		mustRun(t, "send", "--session", "sa", "kipa@vm", "while you wait")
+		got, code := p.result(t, 3*time.Second)
+		if code != 0 || got != "ready\n" {
+			t.Fatalf("stdout %q, exit %d; want \"ready\\n\", exit 0; stderr:\n%s", got, code, p.stderr.String())
+		}
+	})
+
+	t.Run("stdin closed ends it quietly", func(t *testing.T) {
+		a, _ := relayPair(t)
+		on(t, a)
+		p := startPager(t, a, wait...)
+		time.Sleep(500 * time.Millisecond)
+		p.running(t)
+		p.stdin.Close()
+		got, code := p.result(t, 2*time.Second)
+		if code != 0 || got != "" {
+			t.Fatalf("stdout %q, exit %d; want none, exit 0; stderr:\n%s", got, code, p.stderr.String())
+		}
+	})
+
+	t.Run("timeout 1s gives timeout", func(t *testing.T) {
+		a, _ := relayPair(t)
+		on(t, a)
+		start := time.Now()
+		p := startPager(t, a, append(wait, "--timeout", "1s")...)
+		got, code := p.result(t, 3*time.Second)
+		if code != 0 || got != "timeout\n" {
+			t.Fatalf("stdout %q, exit %d; want \"timeout\\n\", exit 0; stderr:\n%s", got, code, p.stderr.String())
+		}
+		if took := time.Since(start); took < time.Second {
+			t.Errorf("timeout after %v, before the 1s asked for", took)
+		}
+	})
+
+	// Windows has no signal to send a process; there stdin is how a transport
+	// stops it, which the case above covers.
+	if runtime.GOOS != "windows" {
+		for _, sig := range []os.Signal{syscall.SIGTERM, os.Interrupt} {
+			t.Run(sig.String()+" ends it quietly", func(t *testing.T) {
+				a, _ := relayPair(t)
+				on(t, a)
+				p := startPager(t, a, wait...)
+				// Time for the handler to be in place; before it, the signal
+				// would kill the process and the exit would not be 0.
+				time.Sleep(time.Second)
+				p.running(t)
+				if err := p.cmd.Process.Signal(sig); err != nil {
+					t.Fatalf("signal: %v", err)
+				}
+				got, code := p.result(t, 2*time.Second)
+				if code != 0 || got != "" {
+					t.Fatalf("stdout %q, exit %d; want none, exit 0; stderr:\n%s", got, code, p.stderr.String())
+				}
+			})
 		}
 	}
 }
@@ -495,8 +669,8 @@ func TestPeerCommandsThroughTheCLI(t *testing.T) {
 }
 
 // TestPeerAndRelayExitTwoOnlyForUsage pins the rule the reference states
-// beside the transport's exit table: outside relay out, in and ack, a usage
-// mistake exits 2 and a refusal exits 1, whatever flags were given.
+// beside the transport's exit table: outside relay out, in, ack and wait, a
+// usage mistake exits 2 and a refusal exits 1, whatever flags were given.
 func TestPeerAndRelayExitTwoOnlyForUsage(t *testing.T) {
 	a, b := relayPair(t)
 	on(t, b)
