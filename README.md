@@ -176,6 +176,20 @@ writes itself.
 - [session-binding.md](docs/session-binding.md) — how a session is identified
 
 Korean versions of all four are alongside them as `*.ko.md`.
+[CHANGELOG.md](CHANGELOG.md) has the patch notes for every release.
+
+## Releasing
+
+Every version bump comes with patch notes, in the same commit:
+
+1. Set `Version` in `internal/version/version.go`.
+2. Add `## <version> — <date>` at the top of [CHANGELOG.md](CHANGELOG.md):
+   what changed for someone running pager, with commit ids, and an Upgrading
+   note on the store schema, the relay protocol and what to restart.
+
+`TestChangelogHasCurrentVersion` fails `go test ./...`, and so
+`make reinstall`, while the entry is missing. Versions are not git tags, so
+`go install …@latest` keeps installing the newest `main`.
 
 ## License
 

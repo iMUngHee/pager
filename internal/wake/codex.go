@@ -16,6 +16,7 @@ import (
 
 	"github.com/iMUngHee/pager/internal/deliver"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/version"
 	_ "modernc.org/sqlite"
 )
 
@@ -222,7 +223,7 @@ func updateCodexQueue(ctx context.Context, thread, body string, clearing *store.
 			return response.Result, nil
 		}
 	}
-	_, err = call("initialize", map[string]any{"clientInfo": map[string]string{"name": "pager", "version": "0.1.0"}, "capabilities": map[string]bool{"experimentalApi": true}})
+	_, err = call("initialize", map[string]any{"clientInfo": map[string]string{"name": "pager", "version": version.Version}, "capabilities": map[string]bool{"experimentalApi": true}})
 	if err != nil {
 		return err
 	}

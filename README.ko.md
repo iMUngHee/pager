@@ -168,6 +168,20 @@ relay된 메일은 pager가 직접 쓰는 줄로 그 사실이 표시됩니다.
 - [session-binding.ko.md](docs/session-binding.ko.md) — 세션을 어떻게 식별하나
 
 네 문서 모두 영문판이 같은 자리에 `*.md`로 있습니다.
+릴리스마다의 패치 노트는 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
+
+## 릴리스
+
+버전을 올릴 때는 같은 커밋에 패치 노트를 씁니다.
+
+1. `internal/version/version.go`의 `Version`을 올립니다.
+2. [CHANGELOG.md](CHANGELOG.md) 맨 위에 `## <version> — <date>`를 추가합니다.
+   pager를 쓰는 사람 입장에서 바뀐 점과 커밋 id, 그리고 store schema ·
+   relay 프로토콜 · 재시작할 것을 적은 Upgrading 단락을 씁니다.
+
+항목이 없으면 `TestChangelogHasCurrentVersion`이 `go test ./...`를, 따라서
+`make reinstall`도 실패시킵니다. 버전은 git 태그가 아니라서
+`go install …@latest`는 계속 `main`의 최신 커밋을 설치합니다.
 
 ## 라이선스
 

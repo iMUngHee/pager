@@ -148,6 +148,7 @@ pager alias review-box                   # 이름을 직접 고르기 (자동 �
 pager claim review-box                   # 오프라인 수신함 이어받기
 pager prune --dry-run                    # 보관 기한 지난 것 확인
 pager export > backup.jsonl              # 저장소 전체를 JSONL로
+pager version                            # 릴리스 버전과 빌드한 커밋 또는 모듈 버전
 
 pager send kipa@vm "…"                   # 다른 저장소의 세션 (저장소 사이의 relay 참고)
 pager relay id                           # 이 저장소의 id — peer가 등록할 값

@@ -25,6 +25,7 @@ import (
 	"github.com/iMUngHee/pager/internal/relay"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/version"
 )
 
 // command is one pager subcommand. This table is the single source of truth
@@ -50,6 +51,7 @@ var commands = []command{
 	{"hook", "<event>", "Hook adapter: deliver pending messages on stdout", hookCmd},
 	{"mcp", "", "Serve the MCP stdio server", serveMCP},
 	{"peer", "add <name> --store <id> | ls | rm <name> [--force] | rebind <name> --store <id>", "Manage the stores this one relays with", peerCmd},
+	{"version", "", "Print the pager version and the build it came from", versionCmd},
 	{"relay", "id | new-id [--force] | out --peer <p> [--limit n] | in --peer <p> | ack --peer <p> | wait --peer <p> [--timeout d]", "Move messages between stores over any transport", relayCmd},
 }
 
@@ -558,6 +560,16 @@ func whoami(args []string) error {
 	return nil
 }
 
+// versionCmd prints the release version and, when the toolchain recorded it,
+// the commit or module version the binary was built from.
+func versionCmd(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("version takes no arguments")
+	}
+	fmt.Println("pager " + version.String())
+	return nil
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "pager: %v\n", err)
@@ -581,6 +593,8 @@ func run(argv []string) error {
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return nil
+	case "--version":
+		return versionCmd(argv[1:])
 	}
 	for _, c := range commands {
 		if c.name == argv[0] {

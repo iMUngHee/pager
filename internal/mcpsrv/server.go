@@ -19,13 +19,11 @@ import (
 	"github.com/iMUngHee/pager/internal/dispatch"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/version"
 	"github.com/iMUngHee/pager/internal/wake"
 )
 
-const (
-	name    = "pager"
-	version = "0.1.0"
-)
+const name = "pager"
 
 // Server wraps an MCP stdio server over one pager database.
 type Server struct {
@@ -38,7 +36,7 @@ type Server struct {
 func New(st *store.Store) *Server {
 	s := &Server{
 		st: st,
-		mcp: mcpserver.NewMCPServer(name, version,
+		mcp: mcpserver.NewMCPServer(name, version.Version,
 			mcpserver.WithToolCapabilities(true)),
 		res: sessionref.New(func(ctx context.Context, client string, host sessionref.Instance) (string, error) {
 			return st.SessionByHost(ctx, client, host.Pid, host.Start, store.DefaultStale)

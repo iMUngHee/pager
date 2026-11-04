@@ -179,6 +179,7 @@ pager alias review-box             # choose a name (in place of the automatic on
 pager claim review-box             # take over an offline inbox
 pager prune --dry-run              # what is past retention
 pager export > backup.jsonl        # the whole store as JSONL
+pager version                      # release, and the commit or module version it was built from
 
 pager send kipa@vm "…"             # a session in another store (see Relaying between stores)
 pager relay id                     # this store's id, for a peer to enrol
