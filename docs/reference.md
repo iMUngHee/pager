@@ -76,6 +76,14 @@ host detection failed at attach time is unknown, not dead, and asserting
 absence without grounds would hide a live notification. The line appears only
 when pager is sure.
 
+A gone host still gets the knock. A restarted Codex runs its sessions under a
+new app-server process, and the record follows only at the session's first
+hook, which waits for its next turn; until then the holder reads as gone while
+its thread still takes a queued poke. So pager knocks anyway: a knock that lands
+(`woken`, `coalesced`) is reported as the knock; a refusal, which only a live
+endpoint can give, keeps its diagnosis but promises no next activity; anything
+else prints the line above.
+
 The CLI and MCP `msg_send` print the **same sentence**, from one place
 (`deliver.Presence.Note`).
 

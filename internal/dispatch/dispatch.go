@@ -29,6 +29,10 @@ type Request struct {
 	// Probe answers whether a recorded host is still running. nil means
 	// sessionref.AliveAt; tests hand in one that answers without a process.
 	Probe deliver.HostProbe
+
+	// Wake pokes the recipient. nil means wake.Wake; tests hand in one that
+	// answers without a host surface.
+	Wake func(ctx context.Context, sessionID, body string) wake.Result
 }
 
 // Result is what was written and what the sender should be told about it.
@@ -119,10 +123,9 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 		return res, nil
 	}
 
-	// Who is behind the name decides whether poking it means anything. A
-	// stranded holder cannot answer a poke, and telling the sender it "will be
-	// delivered on its next activity" — which is what wake says of anything it
-	// could not reach — promises an activity that is not coming.
+	// Who is behind the name decides what the sender is told. With nobody
+	// holding it there is nothing to poke; a stranded holder is still tried,
+	// for the reason given where the poke's outcome is read.
 	probe := req.Probe
 	if probe == nil {
 		probe = sessionref.AliveAt
@@ -131,8 +134,9 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	if line := presence.Note(found.Alias); line != "" {
-		res.Lines = append(res.Lines, line)
+	note := presence.Note(found.Alias)
+	if presence == deliver.PresenceUnheld {
+		res.Lines = append(res.Lines, note)
 		return res, nil
 	}
 
@@ -143,7 +147,33 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	if line := wake.Describe(wake.Wake(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool)), found.Alias); line != "" {
+	poke := req.Wake
+	if poke == nil {
+		poke = wake.Wake
+	}
+	woke := poke(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool))
+
+	// A gone host does not always mean a gone session. A restarted Codex runs
+	// its sessions under a new app-server process, and the record follows only
+	// at the session's first hook, which waits for its next turn — so until
+	// then the holder reads as stranded while its thread still takes a queued
+	// poke. A poke that landed is the stronger evidence. A refusal is evidence
+	// too — wake reports one only after a live endpoint answered — so it is not
+	// called absence, but nor does it promise a next activity: the recorded
+	// host is gone. Anything else keeps the stranded note.
+	if presence == deliver.PresenceStranded {
+		switch woke.Outcome {
+		case wake.Woken, wake.Coalesced:
+		case wake.Refused:
+			res.Lines = append(res.Lines, "note: "+found.Alias+" has a live inbox but refused the poke ("+woke.Via+
+				") and its recorded host is gone — the message waits. This usually means the host's messaging contract changed.")
+			return res, nil
+		default:
+			res.Lines = append(res.Lines, note)
+			return res, nil
+		}
+	}
+	if line := wake.Describe(woke, found.Alias); line != "" {
 		res.Lines = append(res.Lines, line)
 	}
 	return res, nil

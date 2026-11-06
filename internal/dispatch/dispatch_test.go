@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/iMUngHee/pager/internal/clock"
 	"github.com/iMUngHee/pager/internal/deliver"
 	"github.com/iMUngHee/pager/internal/store"
+	"github.com/iMUngHee/pager/internal/wake"
 )
 
 const workspace = "/tmp/workspace"
@@ -84,6 +86,46 @@ func TestLocalSendWordingUnchanged(t *testing.T) {
 	}
 	if label != "sape" {
 		t.Errorf("default label = %q, want the sender's alias", label)
+	}
+}
+
+// TestStrandedHolderIsStillPoked covers a holder whose recorded host is gone
+// while its session lives on — a restarted Codex, until its first hook moves
+// the record. A poke that lands is reported as one; a refusal keeps its
+// diagnosis without promising a next activity; a poke that reaches nothing
+// leaves the stranded note, worded exactly as before.
+func TestStrandedHolderIsStillPoked(t *testing.T) {
+	st := newStore(t)
+	named(t, st, "s-kipa", "kipa", "")
+	strandedNote := "note: kipa's session is gone — the message waits, but nothing will read it " +
+		"until a session in that workspace claims the name; pager who lists who can answer now"
+
+	for _, tc := range []struct {
+		outcome wake.Outcome
+		want    string
+	}{
+		{wake.Woken, "poked kipa (codex-queue) — written to its inbox; its own hook is what delivers"},
+		{wake.Coalesced, "note: kipa already has a pending wake — mail stored without another notification"},
+		{wake.Refused, "note: kipa has a live inbox but refused the poke (codex-queue) and its recorded host is gone" +
+			" — the message waits. This usually means the host's messaging contract changed."},
+		{wake.Queued, strandedNote},
+		{wake.Disabled, strandedNote},
+	} {
+		var poked []string
+		poke := func(_ context.Context, session, _ string) wake.Result {
+			poked = append(poked, session)
+			return wake.Result{Outcome: tc.outcome, Via: "codex-queue"}
+		}
+		res, err := Send(t.Context(), st, Request{Target: "kipa", Body: "x", Human: true, Probe: gone, Wake: poke})
+		if err != nil {
+			t.Fatalf("%s: send: %v", tc.outcome, err)
+		}
+		if want := []string{tc.want}; !slices.Equal(res.Lines, want) {
+			t.Errorf("%s: lines = %q, want %q", tc.outcome, res.Lines, want)
+		}
+		if !slices.Equal(poked, []string{"s-kipa"}) {
+			t.Errorf("%s: poked %q, want the holder's session once", tc.outcome, poked)
+		}
 	}
 }
 
