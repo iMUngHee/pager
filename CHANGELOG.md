@@ -18,6 +18,24 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.6.1 — 2026-11-07
+
+### Fixed
+
+- A send right after a Codex restart now wakes the session. The restarted Codex
+  runs its sessions under a new app-server process, and the session record
+  follows only at the session's first hook, so until then pager judged the
+  holder gone and skipped wake, leaving the mail unread. A holder whose
+  recorded host is gone is now poked too: a poke that lands is reported as
+  `poked`, a refusal keeps its diagnosis without promising a next activity,
+  and anything else prints the `session is gone` note as before. (5909bd9)
+
+### Upgrading
+
+No store or relay change: schema 5 and relay protocol 2, as in 0.6.0, so 0.6.0
+and 0.6.1 binaries can share a store. Restart running `pager mcp` processes
+after reinstalling to get the new send behaviour from MCP `msg_send`.
+
 ## 0.6.0 — 2026-11-04
 
 ### Added
