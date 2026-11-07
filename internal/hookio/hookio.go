@@ -321,7 +321,8 @@ func parse(r io.Reader) (Input, bool) {
 // A title the host reports back as current needs nothing. One that stays
 // different — Claude Code yields a name another live session on the host
 // holds by suffixing it, and keeps the suffix for the life of the process — is
-// requested again on each prompt and cleared by a resume or restart.
+// requested again on each prompt until a resume after the holder has let the
+// name go.
 func sessionTitleFor(ctx context.Context, st *store.Store, event string, in Input, name string) string {
 	if event != EventUserPromptSubmit || name == "" || in.SessionTitle == name {
 		return ""

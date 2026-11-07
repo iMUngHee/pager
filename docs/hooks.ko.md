@@ -101,10 +101,13 @@ Claude Code는 이것을 rename으로 적용하므로 제목, transcript의 agen
 **그리고** 세션에 저장된 tool이 `claude`일 때만 낸다. `AI_AGENT`는 상속되므로 Claude
 세션에서 띄운 Codex도 갖고 있기 때문이다. 그 밖의 경우는 예전 출력을 그대로 유지한다.
 
-**유일한 예외** — 같은 host의 다른 live Claude 세션이 이미 그 이름을 쥐고 있으면
-Claude Code는 접미사를 붙여 양보하고(`nidu-jaunty-knuth`) 그 프로세스가 사는 동안 유지하며,
-그동안 pager는 프롬프트마다 pager 이름을 다시 요청한다. resume이나 재시작하면 pager 이름으로 돌아온다. 제목은 주소 소유의 증거가 아니다: 송신은
-항상 pager를 통해 해석한다.
+**수렴하지 않는 경우** — 같은 host의 다른 live Claude 세션이 이미 그 이름을 쥐고
+있으면 Claude Code는 접미사를 붙여 양보하고(`nidu-jaunty-knuth`) 그 프로세스가 사는
+동안 유지하며, 그동안 pager는 프롬프트마다 pager 이름을 다시 요청한다. 다른 세션이
+이름을 놓은 뒤 이 세션을 resume하면 pager 이름으로 돌아온다. 새로 시작하면 새 세션이라
+새 pager 이름을 받는다. Claude Code가 제목을 정규화하면서 바꿔 쓰는 이름(제어 문자가
+든 수동 alias, 길이 상한을 넘는 alias)도 같은 값으로 돌아오지 않으므로 매 프롬프트
+다시 요청된다. 제목은 주소 소유의 증거가 아니다: 송신은 항상 pager를 통해 해석한다.
 
 ## 한 번의 훅 실행이 하는 일
 

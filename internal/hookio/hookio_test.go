@@ -844,6 +844,7 @@ func TestSessionTitleOnlyForClaudePrompts(t *testing.T) {
 		{"codex inheriting AI_AGENT", "codex", claudeAgent, EventUserPromptSubmit, codexPayload("s1", "hello")},
 		{"claude without AI_AGENT", "claude", "", EventUserPromptSubmit, claudePayload("s1", "hello")},
 		{"another agent", "claude", "cursor_1-0", EventUserPromptSubmit, claudePayload("s1", "hello")},
+		{"no stored tool", "", claudeAgent, EventUserPromptSubmit, claudePayload("s1", "hello")},
 		{"SessionStart", "claude", claudeAgent, EventSessionStart, sessionStartPayload("s1")},
 		{"Stop", "claude", claudeAgent, EventStop,
 			fmt.Sprintf(`{"session_id":"s1","cwd":%q,"hook_event_name":"Stop"}`, workspace)},
@@ -873,5 +874,25 @@ func TestSessionTitleNotOnConsumedPoke(t *testing.T) {
 	}
 	if strings.Contains(raw, "sessionTitle") {
 		t.Errorf("a blocked poke carries a title:\n%s", raw)
+	}
+}
+
+// TestSessionTitleWithFirstName: the prompt that issues a session its name is
+// the one that introduces it and titles the session with it, in one object.
+func TestSessionTitleWithFirstName(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedSessionOnly(t, st, "s1", "claude")
+
+	raw := run(t, EventUserPromptSubmit, claudePayload("s1", "hello"))
+	name := primaryAlias(t, st, "s1")
+	if name == "" {
+		t.Fatal("the session was not named")
+	}
+	if got := additionalContext(t, raw); !strings.Contains(got, name) {
+		t.Errorf("the introduction does not name %q:\n%s", name, raw)
+	}
+	if got := sessionTitle(t, raw); got != name {
+		t.Errorf("sessionTitle = %q, want the name just issued, %q", got, name)
 	}
 }

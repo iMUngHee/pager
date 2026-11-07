@@ -32,16 +32,18 @@ the history's natural stages. The MCP server reported `0.1.0` throughout.
   `AI_AGENT` names Claude Code (2.1.120 and later) and the session's stored
   tool is `claude`; SessionStart, Stop, Codex and every other host keep their
   output unchanged. If another live Claude session on the host holds the name,
-  Claude Code suffixes it for the life of that process; a resume or restart
-  puts it back. See [docs/hooks.md](docs/hooks.md#session-title-claude-code).
+  Claude Code suffixes it for the life of that process; resuming after the
+  other session has let the name go puts it back. See [docs/hooks.md](docs/hooks.md#session-title-claude-code).
   (9cc3fef)
 
 ### Upgrading
 
 No store or relay change: schema 5 and relay protocol 2, as in 0.6.x, so 0.6.x
 and 0.7.0 binaries can share a store. The hook binary is run per event, so the
-new behaviour starts at the next prompt after reinstalling; nothing needs a
-restart. Claude Code older than 2.1.120 sets no `AI_AGENT` and is unaffected.
+new behaviour starts at the next prompt after reinstalling. A running
+`pager mcp` behaves the same but reports 0.6.1 until it is restarted. Claude
+Code older than 2.1.120 sets no `AI_AGENT` and is unaffected, unless it was
+started inside a newer one and inherited it.
 
 ## 0.6.1 — 2026-11-07
 

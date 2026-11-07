@@ -115,11 +115,16 @@ Claude Code 2.1.120; the field exists since 2.1.94) **and** the session's stored
 tool is `claude`, because `AI_AGENT` is inherited — a Codex started from a
 Claude session carries it. Anything else keeps the output it always had.
 
-**The one exception** — if another live Claude session on the same host already
-holds the name, Claude Code yields by suffixing it (`nidu-jaunty-knuth`) and
-keeps the suffix for the life of that process, while pager keeps requesting
-the pager name on each prompt. A resume or restart puts the pager name back. The title is never evidence of who owns an address: sends
-always resolve through pager.
+**Where it does not converge** — if another live Claude session on the same
+host already holds the name, Claude Code yields by suffixing it
+(`nidu-jaunty-knuth`) and keeps the suffix for the life of that process, while
+pager keeps requesting the pager name on each prompt. Resuming the session
+after the other one has let the name go puts the pager name back; a fresh
+start is a new session with a new pager name. A name Claude Code rewrites when
+it normalises a title (a hand-set alias with control characters, or one past
+its length limit) never reads back equal either, so it too is requested on
+every prompt. The title is never evidence of who owns an address: sends always
+resolve through pager.
 
 ## What one hook run does
 
