@@ -27,7 +27,8 @@ the history's natural stages. The MCP server reported `0.1.0` throughout.
   saw no unread mail and blocked the very turn that needed to read the startup
   context. One startup-delivery credit permits that prompt once; later consumed
   wakes are still blocked. If the credit cannot be stored, the startup batch is
-  left unconfirmed for retry. The native startup-wake smoke now registers both
+  left unconfirmed for retry, which can deliver it again after its lease expires.
+  The native startup-wake smoke now registers both
   hooks and checks for a real model response. (6ffbe0a)
 
 ### Upgrading
@@ -36,7 +37,9 @@ No store or relay change: schema 5 and relay protocol 2, as in 0.7.0. Hooks run
 the new binary at their next invocation after reinstalling. The empty
 `<db>.startup-<session hash>` sidecars are transient, contain no mail, and are
 ignored by older binaries. They are consumed by the next prompt or discarded
-at that session's next startup. A running `pager mcp` retains its old reported
+at that session's next startup. If neither event happens after a crash, an empty
+sidecar can remain; it is safe to remove when the session is not running.
+A running `pager mcp` retains its old reported
 version until restarted; this fix is in the per-event hook binary.
 
 ## 0.7.0 — 2026-11-07

@@ -76,7 +76,8 @@ The following prompt atomically removes it, so that turn can reach the model
 even though its mail has already been confirmed. A genuine prompt consumes the
 credit too; a new SessionStart discards an abandoned one. Later consumed pokes
 still block. If the credit cannot be stored, startup mail is left unconfirmed
-for retry rather than letting the following wake discard it. The transient
+for retry rather than letting the following wake discard it; the mail can be
+delivered again after its lease expires. The transient
 sidecar holds no message content and changes neither the store schema nor the
 relay protocol. Older binaries ignore it. A crash before the next prompt may
 leave a sidecar until that session starts again; removing it is safe when the
