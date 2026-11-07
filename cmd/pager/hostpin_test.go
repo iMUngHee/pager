@@ -32,6 +32,10 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PAGER_WAKE") == "" {
 		os.Setenv("PAGER_WAKE", "off")
 	}
+	// Claude Code exports AI_AGENT to its subprocesses, which would switch
+	// session titles on for every claude fixture when the suite runs inside a
+	// Claude session. See internal/hookio's TestMain.
+	os.Unsetenv("AI_AGENT")
 	if os.Getenv(asPager) == "1" {
 		main()
 		os.Exit(0)

@@ -25,6 +25,10 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PAGER_CLIENT") == "" {
 		os.Setenv("PAGER_CLIENT", "none")
 	}
+	// Claude Code exports AI_AGENT to every subprocess, so `go test` run from a
+	// Claude session would switch session titles on for every fixture. Tests
+	// that want it set it themselves.
+	os.Unsetenv("AI_AGENT")
 	os.Exit(m.Run())
 }
 

@@ -750,3 +750,128 @@ func TestSessionStartKeepsThePurpose(t *testing.T) {
 		t.Errorf("purpose = %q after a promptless event, want %q", got, want)
 	}
 }
+
+// --- session title -----------------------------------------------------
+
+const claudeAgent = "claude-code_2-1-319_harness"
+
+// sessionTitle extracts hookSpecificOutput.sessionTitle, failing on a malformed
+// envelope.
+func sessionTitle(t *testing.T, raw string) string {
+	t.Helper()
+	if raw == "" {
+		return ""
+	}
+	var parsed struct {
+		HookSpecificOutput struct {
+			SessionTitle string `json:"sessionTitle"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, raw)
+	}
+	return parsed.HookSpecificOutput.SessionTitle
+}
+
+func titledPayload(session, prompt, title string) string {
+	return fmt.Sprintf(`{"session_id":%q,"cwd":%q,"hook_event_name":"UserPromptSubmit",`+
+		`"prompt":%q,"session_title":%q}`, session, workspace, prompt, title)
+}
+
+// TestSessionTitleFollowsThePagerName: a Claude session whose title is not yet
+// the pager name gets it, and nothing else is injected alongside it.
+func TestSessionTitleFollowsThePagerName(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedInbox(t, st, "s1", "claude", "kexo")
+
+	raw := run(t, EventUserPromptSubmit, claudePayload("s1", "hello"))
+	if got := sessionTitle(t, raw); got != "kexo" {
+		t.Errorf("sessionTitle = %q, want the pager name %q\n%s", got, "kexo", raw)
+	}
+	if strings.Contains(raw, "additionalContext") {
+		t.Errorf("a title-only output carries additionalContext:\n%s", raw)
+	}
+}
+
+// TestSessionTitleSilentWhenCurrent keeps the steady state as quiet as before:
+// once the host reports the pager name back, the hook has nothing to say.
+func TestSessionTitleSilentWhenCurrent(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedInbox(t, st, "s1", "claude", "kexo")
+
+	if got := run(t, EventUserPromptSubmit, titledPayload("s1", "hello", "kexo")); got != "" {
+		t.Errorf("output = %q, want silence when the title already is the pager name", got)
+	}
+}
+
+// TestSessionTitleRestoredAfterRename: /rename fires no hook, so the next
+// prompt is where a different title is put back.
+func TestSessionTitleRestoredAfterRename(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedInbox(t, st, "s1", "claude", "kexo")
+
+	if got := sessionTitle(t, run(t, EventUserPromptSubmit, titledPayload("s1", "hello", "other"))); got != "kexo" {
+		t.Errorf("sessionTitle = %q after a rename, want %q", got, "kexo")
+	}
+}
+
+// TestSessionTitleRidesWithMail: the title shares the envelope with delivery,
+// and adding it must not cost a single message.
+func TestSessionTitleRidesWithMail(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedInbox(t, st, "s1", "claude", "kexo")
+	queue(t, st, "kexo", "@codex", "the migration is ready")
+
+	raw := run(t, EventUserPromptSubmit, claudePayload("s1", "what's next?"))
+	if got := additionalContext(t, raw); !strings.Contains(got, "the migration is ready") {
+		t.Errorf("mail was lost next to the title:\n%s", raw)
+	}
+	if got := sessionTitle(t, raw); got != "kexo" {
+		t.Errorf("sessionTitle = %q, want %q", got, "kexo")
+	}
+}
+
+// TestSessionTitleOnlyForClaudePrompts pins every case that must keep the
+// output it had before titles existed.
+func TestSessionTitleOnlyForClaudePrompts(t *testing.T) {
+	cases := []struct {
+		name, tool, agent, event, payload string
+	}{
+		{"codex inheriting AI_AGENT", "codex", claudeAgent, EventUserPromptSubmit, codexPayload("s1", "hello")},
+		{"claude without AI_AGENT", "claude", "", EventUserPromptSubmit, claudePayload("s1", "hello")},
+		{"another agent", "claude", "cursor_1-0", EventUserPromptSubmit, claudePayload("s1", "hello")},
+		{"SessionStart", "claude", claudeAgent, EventSessionStart, sessionStartPayload("s1")},
+		{"Stop", "claude", claudeAgent, EventStop,
+			fmt.Sprintf(`{"session_id":"s1","cwd":%q,"hook_event_name":"Stop"}`, workspace)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := newEnv(t)
+			t.Setenv("AI_AGENT", c.agent)
+			seedInbox(t, st, "s1", c.tool, "kexo")
+			if got := run(t, c.event, c.payload); got != "" {
+				t.Errorf("output = %q, want the pre-title silence", got)
+			}
+		})
+	}
+}
+
+// TestSessionTitleNotOnConsumedPoke: a blocked wake prompt is not the person's
+// turn, and its block decision stays exactly what it was.
+func TestSessionTitleNotOnConsumedPoke(t *testing.T) {
+	st := newEnv(t)
+	t.Setenv("AI_AGENT", claudeAgent)
+	seedInbox(t, st, "s1", "claude", "kexo")
+
+	raw := run(t, EventUserPromptSubmit, claudePayload("s1", wake.PokeBody("kexo", "sender", "claude")))
+	if !strings.Contains(raw, `"decision":"block"`) {
+		t.Fatalf("expected the consumed poke to be blocked:\n%s", raw)
+	}
+	if strings.Contains(raw, "sessionTitle") {
+		t.Errorf("a blocked poke carries a title:\n%s", raw)
+	}
+}

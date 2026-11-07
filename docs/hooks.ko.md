@@ -67,8 +67,44 @@ hop은 추적 정보이며 기존 시간당 예산과 3홉 차단은 제거했�
 | `cwd` | ✅ | ✅ | workspace root (별칭 격리 축) |
 | `project_dir` | — | ✅ | workspace root (우선) |
 | `transcript_path` | ✅ | ✅ | 미사용 (1단계 범위 밖) |
+| `session_title` | ✅ (제목이 정해진 뒤) | — | 이미 pager 이름인 세션 제목을 건너뛰기 |
 
 workspace root 해석 순서: `project_dir` → `cwd` → `CLAUDE_PROJECT_DIR` → 프로세스 작업 디렉토리.
+
+## 세션 제목 (Claude Code)
+
+`UserPromptSubmit`에서 제목이 pager 이름이 아닌 Claude Code 세션에는
+`hookSpecificOutput.sessionTitle`을 그 이름으로 넣는다. `additionalContext`가 있으면
+같은 객체에 함께 담긴다:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "sessionTitle": "nidu"
+  }
+}
+```
+
+Claude Code는 이것을 rename으로 적용하므로 제목, transcript의 agent name, 그리고
+`ListAgents`·`SendMessage`가 주소로 쓰는 live 레지스트리 이름이 모두 pager 이름이 된다.
+이 이벤트에만 싣는다:
+
+- **SessionStart에는 싣지 않는다.** SessionStart 제목은 제목과 agent name만 바꾸고
+  레지스트리 이름은 바꾸지 않으며, 제목을 같게 만들어 이후 `UserPromptSubmit`도
+  레지스트리 이름을 바꾸지 못하게 한다. resume은 세 이름을 transcript에서 모두
+  복원하므로 startup은 건드리지 않고, 새 세션은 첫 프롬프트에서 이름을 받는다.
+- **`/rename`은 훅을 발생시키지 않는다.** rename한 세션은 다음 프롬프트에서 되돌아온다.
+- **`session_title`이 pager 이름을 보고하면 아무것도 내지 않는다** — 평상시에는 예전처럼 조용하다.
+
+`AI_AGENT`가 `claude-code_`로 시작하고(Claude Code 2.1.120부터 설정, 필드는 2.1.94부터)
+**그리고** 세션에 저장된 tool이 `claude`일 때만 낸다. `AI_AGENT`는 상속되므로 Claude
+세션에서 띄운 Codex도 갖고 있기 때문이다. 그 밖의 경우는 예전 출력을 그대로 유지한다.
+
+**유일한 예외** — 같은 host의 다른 live Claude 세션이 이미 그 이름을 쥐고 있으면
+Claude Code는 접미사를 붙여 양보하고(`nidu-jaunty-knuth`) 그 프로세스가 사는 동안 유지하며,
+그동안 pager는 프롬프트마다 pager 이름을 다시 요청한다. resume이나 재시작하면 pager 이름으로 돌아온다. 제목은 주소 소유의 증거가 아니다: 송신은
+항상 pager를 통해 해석한다.
 
 ## 한 번의 훅 실행이 하는 일
 
@@ -81,7 +117,7 @@ workspace root 해석 순서: `project_dir` → `cwd` → `CLAUDE_PROJECT_DIR` �
 4. 후보 조회      ← claim 없음. 트랜잭션 밖
 5. 예산 선정      ← 탈락분은 건드리지 않는다 (starvation 방지)
 6. 선정분 claim   ← BEGIN IMMEDIATE 한 트랜잭션
-7. stdout 출력    ← 이름을 방금 받았다면 그 사실을 맨 앞에 한 줄 붙인다
+7. stdout 출력    ← 이름을 방금 받았다면 그 사실을 맨 앞에 한 줄 붙인다. Claude 세션 제목도 같은 객체에 실린다
 8. 확정           ← 출력 뒤. 사이에서 죽으면 lease 만료 후 재시도된다
 9. prune 기회     ← gate 선점에 성공한 훅 하나만
 ```

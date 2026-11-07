@@ -1,7 +1,8 @@
 // Package hookio adapts pager to the hook contract Claude Code and Codex
 // share: a JSON payload on stdin, and an optional
 // hookSpecificOutput.additionalContext object on stdout that the host folds
-// into the agent's next turn.
+// into the agent's next turn. For Claude Code the same object can also carry
+// sessionTitle, which keeps the session named after its pager name.
 //
 // Errors here fail open. A hook that exits non-zero or prints a
 // diagnostic can stall or pollute the session it was meant to serve, and a
@@ -46,13 +47,18 @@ type Input struct {
 	CWD            string `json:"cwd"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
+	// SessionTitle is the title Claude Code currently shows. It is absent
+	// until one is set, and absent altogether on versions that predate it.
+	SessionTitle string `json:"session_title"`
 }
 
-// output is the object both hosts accept.
+// output is the object both hosts accept. sessionTitle is Claude Code's alone
+// and is only ever set where sessionTitleFor allows it.
 type output struct {
 	HookSpecificOutput struct {
 		HookEventName     string `json:"hookEventName"`
-		AdditionalContext string `json:"additionalContext"`
+		AdditionalContext string `json:"additionalContext,omitempty"`
+		SessionTitle      string `json:"sessionTitle,omitempty"`
 	} `json:"hookSpecificOutput"`
 }
 
@@ -149,8 +155,9 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	if named {
 		text.body = deliver.RenderIntroduction(name) + text.body
 	}
-	if text.body != "" {
-		if err := write(stdout, event, text.body); err != nil {
+	title := sessionTitleFor(ctx, st, event, in, name)
+	if text.body != "" || title != "" {
+		if err := write(stdout, event, text.body, title); err != nil {
 			return
 		}
 	}
@@ -292,10 +299,47 @@ func parse(r io.Reader) (Input, bool) {
 	return in, true
 }
 
-func write(w io.Writer, event, context string) error {
+// sessionTitleFor returns the title to hand Claude Code, or "" to leave it.
+//
+// Setting it from UserPromptSubmit makes Claude Code apply it as a rename,
+// which moves the title, the transcript's agent name and the live registry
+// name — the one ListAgents and SendMessage address — onto the pager name.
+// SessionStart would only move the first two, and by making the title equal it
+// would stop every later UserPromptSubmit from moving the third, so startup is
+// deliberately left alone; a resume restores all three from the transcript.
+// /rename runs no hook, so a renamed session is put back on its next prompt.
+//
+// AI_AGENT is how the host is recognised as Claude Code: it has been exported
+// since 2.1.120, and the field since 2.1.94, so a host that sets it can take
+// the title and one that does not keeps the output it always had. The stored
+// tool is checked as well because AI_AGENT is inherited — a Codex started from
+// a Claude session carries it, and Codex has no such field. A Claude Code
+// older than 2.1.120 started inside a newer one would inherit it too; that
+// version still knows the field (2.1.94+) unless it is older than that, a
+// nesting this does not guard against.
+//
+// A title the host reports back as current needs nothing. One that stays
+// different — Claude Code yields a name another live session on the host
+// holds by suffixing it, and keeps the suffix for the life of the process — is
+// requested again on each prompt and cleared by a resume or restart.
+func sessionTitleFor(ctx context.Context, st *store.Store, event string, in Input, name string) string {
+	if event != EventUserPromptSubmit || name == "" || in.SessionTitle == name {
+		return ""
+	}
+	if !strings.HasPrefix(os.Getenv("AI_AGENT"), "claude-code_") {
+		return ""
+	}
+	if _, tool, err := deliver.SessionWorkspace(ctx, st, in.SessionID); err != nil || tool != sessionref.Claude {
+		return ""
+	}
+	return name
+}
+
+func write(w io.Writer, event, context, title string) error {
 	var out output
 	out.HookSpecificOutput.HookEventName = event
 	out.HookSpecificOutput.AdditionalContext = context
+	out.HookSpecificOutput.SessionTitle = title
 	enc := json.NewEncoder(w)
 	return enc.Encode(out)
 }

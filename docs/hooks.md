@@ -76,9 +76,50 @@ unchanged exchange; missing activity is unknown and never a reason to pause.
 | `cwd` | ✅ | ✅ | Workspace root (the alias isolation axis) |
 | `project_dir` | — | ✅ | Workspace root (preferred) |
 | `transcript_path` | ✅ | ✅ | Unused (outside phase-one scope) |
+| `session_title` | ✅ (once a title is set) | — | Skipping a session title that is already the pager name |
 
 Workspace root resolution order: `project_dir` → `cwd` → `CLAUDE_PROJECT_DIR` →
 the process working directory.
+
+## Session title (Claude Code)
+
+On `UserPromptSubmit`, a Claude Code session whose title is not its pager name
+gets `hookSpecificOutput.sessionTitle` set to that name, in the same object as
+any `additionalContext`:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "sessionTitle": "nidu"
+  }
+}
+```
+
+Claude Code applies it as a rename, so the title, the transcript's agent name
+and the live registry name — the one `ListAgents` and `SendMessage` address —
+all become the pager name. Only that event carries it:
+
+- **Not SessionStart.** A SessionStart title moves the title and agent name but
+  not the registry name, and by making the title equal it stops every later
+  `UserPromptSubmit` from moving the registry name either. A resume restores all
+  three from the transcript, so startup is left alone and a new session takes
+  the name on its first prompt.
+- **`/rename` runs no hook**, so a renamed session is put back on its next
+  prompt.
+- **Once `session_title` reports the pager name, nothing is emitted** — the
+  steady state is as quiet as before.
+
+It is emitted only when `AI_AGENT` starts with `claude-code_` (exported since
+Claude Code 2.1.120; the field exists since 2.1.94) **and** the session's stored
+tool is `claude`, because `AI_AGENT` is inherited — a Codex started from a
+Claude session carries it. Anything else keeps the output it always had.
+
+**The one exception** — if another live Claude session on the same host already
+holds the name, Claude Code yields by suffixing it (`nidu-jaunty-knuth`) and
+keeps the suffix for the life of that process, while pager keeps requesting
+the pager name on each prompt. A resume or restart puts the pager name back. The title is never evidence of who owns an address: sends
+always resolve through pager.
 
 ## What one hook run does
 
@@ -91,7 +132,7 @@ The order is meaningful.
 4. query candidates  ← no claim. Outside the transaction
 5. select by budget  ← rejects are left untouched (starvation guard)
 6. claim the selected ← one BEGIN IMMEDIATE transaction
-7. write stdout      ← if a name was just issued, prepend one line saying so
+7. write stdout      ← if a name was just issued, prepend one line saying so. A Claude session title rides in the same object
 8. confirm           ← after the write. Dying in between means a retry once the lease expires
 9. prune opportunity ← only the one hook that wins the gate
 ```
