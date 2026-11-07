@@ -84,8 +84,14 @@ rollback: ## Restore the most recent binary kept by a reinstall
 	 echo "  $$(ls "$(BIN)".prev.* 2>/dev/null | wc -l | tr -d ' ') older backups left"
 	@$(MAKE) --no-print-directory smoke CAND="$(BIN)"
 
+# The race detector needs cgo everywhere but macOS, so `test` alone turns it
+# back on there. That makes a C toolchain a test-time requirement on Linux —
+# without one there is no race detector to run — while the binary itself is
+# still built and installed with CGO_ENABLED=0.
+RACE_CGO := $(if $(filter darwin,$(shell go env GOOS)),0,1)
+
 test: ## Run all tests with the race detector
-	go test -race ./...
+	CGO_ENABLED=$(RACE_CGO) go test -race ./...
 
 vet: ## Run go vet
 	go vet ./...
