@@ -18,6 +18,27 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.7.1 — 2026-11-08
+
+### Fixed
+
+- A Codex wake after loading a session now reaches the model when SessionStart
+  already delivered its mail. Previously the following UserPromptSubmit hook
+  saw no unread mail and blocked the very turn that needed to read the startup
+  context. One startup-delivery credit permits that prompt once; later consumed
+  wakes are still blocked. If the credit cannot be stored, the startup batch is
+  left unconfirmed for retry. The native startup-wake smoke now registers both
+  hooks and checks for a real model response. (6ffbe0a)
+
+### Upgrading
+
+No store or relay change: schema 5 and relay protocol 2, as in 0.7.0. Hooks run
+the new binary at their next invocation after reinstalling. The empty
+`<db>.startup-<session hash>` sidecars are transient, contain no mail, and are
+ignored by older binaries. They are consumed by the next prompt or discarded
+at that session's next startup. A running `pager mcp` retains its old reported
+version until restarted; this fix is in the per-event hook binary.
+
 ## 0.7.0 — 2026-11-07
 
 ### Added
