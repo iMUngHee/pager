@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/iMUngHee/pager/internal/clock"
@@ -148,6 +150,125 @@ func TestPokeDatabaseFailureDoesNotBlock(t *testing.T) {
 	raw := run(t, EventUserPromptSubmit, codexPayload("s1", wake.PokeBody("inbox", "sender", "codex")))
 	if strings.Contains(raw, `"decision":"block"`) {
 		t.Fatalf("blocked after database failure: %s", raw)
+	}
+}
+
+func TestStartupDeliveryAllowsItsWakeOnce(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "codex", "inbox")
+	queue(t, st, "inbox", "sender", "startup mail")
+	startup := run(t, EventSessionStart, sessionStartPayload("s1"))
+	if !strings.Contains(additionalContext(t, startup), "startup mail") {
+		t.Fatalf("startup did not deliver mail: %s", startup)
+	}
+	poke := codexPayload("s1", wake.PokeBody("inbox", "sender", "claude"))
+	if got := run(t, EventUserPromptSubmit, poke); strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("blocked the turn whose startup hook just delivered mail: %s", got)
+	}
+	if got := run(t, EventUserPromptSubmit, poke); !strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("a second consumed wake was not blocked: %s", got)
+	}
+}
+
+func TestStartupDeliveryCreditEndsAtAnyPrompt(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "codex", "inbox")
+	queue(t, st, "inbox", "sender", "startup mail")
+	run(t, EventSessionStart, sessionStartPayload("s1"))
+	run(t, EventUserPromptSubmit, codexPayload("s1", "human prompt"))
+	poke := codexPayload("s1", wake.PokeBody("inbox", "sender", "claude"))
+	if got := run(t, EventUserPromptSubmit, poke); !strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("an old startup delivery kept a later wake alive: %s", got)
+	}
+}
+
+func TestNewStartupDiscardsAbandonedCredit(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "codex", "inbox")
+	queue(t, st, "inbox", "sender", "startup mail")
+	run(t, EventSessionStart, sessionStartPayload("s1"))
+	run(t, EventSessionStart, sessionStartPayload("s1"))
+	poke := codexPayload("s1", wake.PokeBody("inbox", "sender", "claude"))
+	if got := run(t, EventUserPromptSubmit, poke); !strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("a resumed session retained an abandoned startup credit: %s", got)
+	}
+}
+
+func TestStartupCreditIsIsolatedAndConsumedAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "msg.db")
+	if _, err := startupDeliveryCredit(path, "s1", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]string{{path, "s2"}, {path + ".other", "s1"}} {
+		if got, err := startupDeliveryCredit(pair[0], pair[1], false); got || err != nil {
+			t.Fatalf("another store/session consumed credit: got=%v err=%v", got, err)
+		}
+	}
+	results := make(chan bool, 16)
+	var workers sync.WaitGroup
+	for range cap(results) {
+		workers.Go(func() {
+			got, err := startupDeliveryCredit(path, "s1", false)
+			if err != nil {
+				t.Error(err)
+			}
+			results <- got
+		})
+	}
+	workers.Wait()
+	close(results)
+	taken := 0
+	for got := range results {
+		if got {
+			taken++
+		}
+	}
+	if taken != 1 {
+		t.Fatalf("credit consumed %d times, want exactly once", taken)
+	}
+}
+
+func TestStartupCreditFailureLeavesMailUnread(t *testing.T) {
+	detectionOff(t)
+	st := newEnv(t)
+	seedInbox(t, st, "s1", "codex", "inbox")
+	queue(t, st, "inbox", "sender", "first mail")
+	run(t, EventSessionStart, sessionStartPayload("s1"))
+	path := os.Getenv("PAGER_DB")
+	markers, err := filepath.Glob(path + ".startup-*")
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("startup marker: %v %v", markers, err)
+	}
+	// A non-empty directory cannot be replaced or removed as a credit file.
+	if err := os.Remove(markers[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(markers[0], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markers[0], "held"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	poke := codexPayload("s1", wake.PokeBody("inbox", "sender", "claude"))
+	if got := run(t, EventUserPromptSubmit, poke); strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("an unreadable startup credit blocked its wake: %s", got)
+	}
+	id := queue(t, st, "inbox", "sender", "second mail")
+	if got := run(t, EventSessionStart, sessionStartPayload("s1")); !strings.Contains(got, "second mail") {
+		t.Fatalf("startup did not emit its mail: %s", got)
+	}
+	var confirmed bool
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT delivered_at IS NOT NULL FROM messages WHERE id = ?", id).Scan(&confirmed); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("startup mail was confirmed without a usable credit")
+	}
+	if got := run(t, EventUserPromptSubmit, poke); strings.Contains(got, `"decision":"block"`) {
+		t.Fatalf("credit failure blocked startup mail: %s", got)
 	}
 }
 

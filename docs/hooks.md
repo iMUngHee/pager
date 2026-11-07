@@ -67,6 +67,32 @@ is not an authentication token or a traffic-budget bypass. The signal-based
 wake guard requires explicit fresh idle state from both peers plus a repeated,
 unchanged exchange; missing activity is unknown and never a reason to pause.
 
+## Codex startup deliveries
+
+Codex runs SessionStart before UserPromptSubmit in a newly loaded turn. When
+SessionStart delivers mail, pager records one startup-delivery credit in an
+empty sidecar beside the selected database (`<db>.startup-<session hash>`).
+The following prompt atomically removes it, so that turn can reach the model
+even though its mail has already been confirmed. A genuine prompt consumes the
+credit too; a new SessionStart discards an abandoned one. Later consumed pokes
+still block. If the credit cannot be stored, startup mail is left unconfirmed
+for retry rather than letting the following wake discard it. The transient
+sidecar holds no message content and changes neither the store schema nor the
+relay protocol. Older binaries ignore it. A crash before the next prompt may
+leave a sidecar until that session starts again; removing it is safe when the
+session is not running.
+
+Check this sequence against a real Codex host and an isolated local model:
+
+```bash
+python scripts/codex-loop-smoke.py --startup-wake-only --pager /path/to/pager --codex /path/to/codex
+```
+
+The fixture registers both startup and prompt hooks, queues a wake before the
+first model turn, and checks that the model sees the startup mail and replies.
+This path was run on Linux with Codex 0.167.0; native macOS/Windows runs remain
+pending. The Go credit implementation uses portable filesystem operations.
+
 ## Input fields
 
 | Field | Claude Code | Codex | What pager uses it for |

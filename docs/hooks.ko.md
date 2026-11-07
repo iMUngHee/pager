@@ -58,6 +58,29 @@ hop은 추적 정보이며 기존 시간당 예산과 3홉 차단은 제거했�
 우회 기능이 아니다. 새 깨우기 제어는 양쪽의 명시적 최신 idle 신호와 변하지 않는 왕복을 함께
 요구하며 신호가 없다는 이유만으로 멈추지 않는다.
 
+## Codex 시작 훅의 전달
+
+Codex는 새로 불러온 턴에서 SessionStart를 UserPromptSubmit보다 먼저 실행한다.
+SessionStart가 메일을 전달하면 선택한 DB 옆의 빈 sidecar
+(`<db>.startup-<session hash>`)에 한 번의 시작 전달 표식을 남긴다.
+다음 프롬프트가 이를 원자적으로 제거하므로, 메일을 이미 전달 확정했어도
+그 턴은 모델까지 이어진다. 일반 사용자 프롬프트도 표식을 소비하고 새
+SessionStart는 방치된 표식을 지운다. 이후의 처리된 poke는 계속 차단한다.
+표식을 저장하지 못하면 시작 메일을 미확정으로 남겨 재시도한다. sidecar에는
+메일 본문이 없고 DB 스키마와 relay 규약은 바뀌지 않으며 구버전은 이를 무시한다.
+다음 프롬프트 전에 종료되면 같은 세션을 다시 시작할 때까지 파일이 남을 수 있다.
+세션이 실행 중이 아닐 때는 이 파일을 지워도 된다.
+
+실제 Codex와 격리된 로컬 모델로 이 순서를 검증한다:
+
+```bash
+python scripts/codex-loop-smoke.py --startup-wake-only --pager /path/to/pager --codex /path/to/codex
+```
+
+fixture는 시작·프롬프트 훅을 모두 등록하고 첫 모델 턴 전에 깨우기를 큐에 넣어,
+모델이 시작 메일을 받아 응답하는지 검사한다. Linux의 Codex 0.167.0에서
+실행했으며 macOS/Windows 실기 실행은 아직 필요하다.
+
 ## 입력 필드
 
 | 필드 | Claude Code | Codex | pager의 용도 |

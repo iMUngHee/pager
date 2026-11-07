@@ -24,6 +24,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--pager', default=shutil.which('pager'), help='candidate pager executable')
 parser.add_argument('--codex', default=shutil.which('codex'), help='compatible native Codex executable')
+parser.add_argument('--startup-wake-only', action='store_true', help='check that startup mail delivery does not block its queued wake')
 args = parser.parse_args()
 if not args.pager or not args.codex:
     parser.error('provide --pager and --codex executable paths')
@@ -36,11 +37,14 @@ env = dict(os.environ, CODEX_HOME=str(home), PAGER_DB=str(scratch / "pager.db"),
 env.pop("PAGER_SESSION", None)
 if os.name == 'nt':
     # Windows command hooks need PowerShell to invoke paths containing spaces.
-    hook_command = 'powershell.exe -NoProfile -Command ' + chr(34) + "& '" + binary.as_posix().replace("'", "''") + "' hook UserPromptSubmit" + chr(34)
+    hook_command = 'powershell.exe -NoProfile -Command ' + chr(34) + "& '" + binary.as_posix().replace("'", "''") + "' hook" + chr(34)
 else:
-    hook_command = shlex.join([str(binary), 'hook', 'UserPromptSubmit'])
+    hook_command = shlex.join([str(binary), 'hook'])
 # Hooks are registered by the host at startup, rather than per-thread overrides.
-(home / "config.toml").write_text("[hooks]\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = 'command'\ncommand = " + json.dumps(hook_command) + "\ncommand_windows = " + json.dumps(hook_command) + "\ntimeout = 10\n", encoding="utf-8")
+(home / "config.toml").write_text("[hooks]\n" + "".join(
+    f"[[hooks.{event}]]\n[[hooks.{event}.hooks]]\ntype = 'command'\ncommand = " + json.dumps(hook_command) + "\ncommand_windows = " + json.dumps(hook_command) + "\ntimeout = 10\n"
+    for event in ('SessionStart', 'UserPromptSubmit')
+), encoding="utf-8")
 request_count = 0
 mode = 'setup'
 turn_plans = {}
@@ -229,8 +233,27 @@ def release_finished():
 
 try:
     call('initialize',{'clientInfo':{'name':'pager_loop_live','version':'1'},'capabilities':{'experimentalApi':True}})
-    hook=call('hooks/list',{'cwds':[str(scratch)]})['data'][0]['hooks'][0]
-    call('config/value/write',{'keyPath':'hooks.state.'+json.dumps(hook['key'])+'.trusted_hash','value':hook['currentHash'],'mergeStrategy':'upsert'})
+    for hook in call('hooks/list',{'cwds':[str(scratch)]})['data'][0]['hooks']:
+        call('config/value/write',{'keyPath':'hooks.state.'+json.dumps(hook['key'])+'.trusted_hash','value':hook['currentHash'],'mergeStrategy':'upsert'})
+    if args.startup_wake_only:
+        started=call('thread/start',{'cwd':str(scratch),'ephemeral':False,'approvalPolicy':'never','sandbox':'danger-full-access',
+          'config':{'model_provider':'fixture','model':'fixture','model_providers.fixture':{'name':'fixture','base_url':f'http://127.0.0.1:{model.server_port}','wire_api':'responses','request_max_retries':0,'stream_max_retries':0}}})
+        identity=started['thread']['id'];actor_aliases[identity]='startup'
+        pager('attach','--session',identity,'--tool','codex','--root',str(scratch))
+        pager('alias','startup','--session',identity)
+        env['PAGER_WAKE']='off'
+        pager('send','--human','startup','startup wake regression mail')
+        poke='pager: new mail for startup from sender (claude session). [pager-poke] If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read).'
+        call('thread/queue/add',{'threadId':identity,'clientUserMessageId':'startup-wake-smoke','input':[{'type':'text','text':poke}]})
+        drive_until(lambda:request_count > 0 and native_idle() and not queued(identity),timeout=15)
+        assert request_count == 1,request_count
+        assert 'startup wake regression mail' in model_payloads[0]
+        assert any(e.get('method')=='turn/completed' and e.get('params',{}).get('turn',{}).get('status')=='completed' for e in notifications)
+        with sqlite3.connect(env['PAGER_DB']) as db:
+            assert db.execute('SELECT delivered_at IS NOT NULL FROM messages').fetchone()[0]
+        print('PASS: SessionStart delivered mail and the queued wake reached the real Codex model request',flush=True)
+        print('PASS: model returned OK; exactly one request; delivery confirmed',flush=True)
+        raise SystemExit(0)
     for alias in ('queue-a','queue-b'):
         started=call('thread/start',{'cwd':str(scratch),'ephemeral':False,'approvalPolicy':'never','sandbox':'danger-full-access',
           'config':{'model_provider':'fixture','model':'fixture','model_providers.fixture':{'name':'fixture','base_url':f'http://127.0.0.1:{model.server_port}','wire_api':'responses','request_max_retries':0,'stream_max_retries':0},

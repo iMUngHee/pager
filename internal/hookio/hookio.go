@@ -16,7 +16,10 @@ package hookio
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -125,6 +128,18 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	// costs the session it was meant to serve.
 	name, named, _ := deliver.EnsureAutoAlias(ctx, st, in.SessionID)
 
+	// Codex runs SessionStart before UserPromptSubmit in the same turn. Mail
+	// delivered by startup has not reached the model yet. Permit the following
+	// prompt once, and discard abandoned credit at the next startup.
+	var startupMail, codexStartup bool
+	var creditErr error
+	if event == EventSessionStart || event == EventUserPromptSubmit {
+		if _, tool, err := deliver.SessionWorkspace(ctx, st, in.SessionID); err == nil && tool == sessionref.Codex {
+			codexStartup = event == EventSessionStart
+			startupMail, creditErr = startupDeliveryCredit(path, in.SessionID, false)
+		}
+	}
+
 	// A user prompt ends whatever exchange preceded it, which is what keeps
 	// ordinary work from accumulating causal depth. See startsNewTurn for what
 	// "a user prompt" is allowed to mean.
@@ -140,7 +155,7 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 	// Only a standalone wake prompt may be dropped, never quoted user text.
 	if event == EventUserPromptSubmit && deliver.IsPokePrompt(in.Prompt) {
 		pending, err := deliver.List(ctx, st, in.SessionID, deliver.FilterWaiting, deliver.LimitsFromEnv())
-		if err == nil && len(pending) == 0 {
+		if err == nil && len(pending) == 0 && !startupMail && creditErr == nil {
 			_ = json.NewEncoder(stdout).Encode(struct {
 				Decision string `json:"decision"`
 				Reason   string `json:"reason"`
@@ -162,6 +177,13 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 		}
 	}
 	if text.token != "" {
+		if codexStartup {
+			if _, err := startupDeliveryCredit(path, in.SessionID, true); err != nil {
+				// Without the credit, confirming would let the next prompt block
+				// this delivery. Keep it unread; its lease can be retried instead.
+				return
+			}
+		}
 		// Best-effort: the messages have already been written out, and an
 		// unconfirmed claim is retried rather than lost.
 		if _, err := deliver.ConfirmDelivery(ctx, st, in.SessionID, text.token); err == nil {
@@ -171,6 +193,25 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 
 	// Housekeeping rides along on whichever hook wins the gate.
 	_, _ = st.PruneOpportunistic(ctx, store.DefaultRetention)
+}
+
+// startupDeliveryCredit records or atomically consumes one startup delivery.
+// The empty sidecar is isolated by database and exact session, so this
+// transient handshake needs no store migration and holds no message content.
+func startupDeliveryCredit(path, session string, remember bool) (bool, error) {
+	marker := fmt.Sprintf("%s.startup-%x", path, sha256.Sum256([]byte(session)))
+	if !remember {
+		err := os.Remove(marker)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false, err
+	}
+	return true, f.Close()
 }
 
 type injection struct {
