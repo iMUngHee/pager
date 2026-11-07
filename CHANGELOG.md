@@ -18,6 +18,31 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.7.0 — 2026-11-07
+
+### Added
+
+- A Claude Code session is now named after its pager name. On
+  `UserPromptSubmit`, `pager hook` sets `hookSpecificOutput.sessionTitle` when
+  the title Claude Code reports differs, and Claude Code applies it as a
+  rename: the title, the transcript's agent name and the live registry name
+  that `ListAgents` and `SendMessage` address all become the pager name. A new
+  session takes it on its first prompt, a resume keeps it, and `/rename`,
+  which runs no hook, is undone on the next prompt. It is sent only when
+  `AI_AGENT` names Claude Code (2.1.120 and later) and the session's stored
+  tool is `claude`; SessionStart, Stop, Codex and every other host keep their
+  output unchanged. If another live Claude session on the host holds the name,
+  Claude Code suffixes it for the life of that process; a resume or restart
+  puts it back. See [docs/hooks.md](docs/hooks.md#session-title-claude-code).
+  (9cc3fef)
+
+### Upgrading
+
+No store or relay change: schema 5 and relay protocol 2, as in 0.6.x, so 0.6.x
+and 0.7.0 binaries can share a store. The hook binary is run per event, so the
+new behaviour starts at the next prompt after reinstalling; nothing needs a
+restart. Claude Code older than 2.1.120 sets no `AI_AGENT` and is unaffected.
+
 ## 0.6.1 — 2026-11-07
 
 ### Fixed
