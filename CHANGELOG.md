@@ -18,6 +18,28 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.7.2 — 2026-11-09
+
+### Fixed
+
+- The startup-delivery credit is now taken exactly once on macOS too. Taking
+  it relied on `os.Remove` succeeding for one caller only, but on APFS
+  concurrent removals of one path can each report success, so overlapping
+  hooks of one Codex session could all take it.
+  `TestStartupCreditIsIsolatedAndConsumedAtomically` failed on every macOS run,
+  which stopped `make reinstall` there. The hook now renames the sidecar to a
+  name only it knows and removes that; a sidecar that cannot be removed is put
+  back, so it still keeps the next startup from recording a credit. (b9e2b4a)
+
+### Upgrading
+
+No store or relay change: schema 5 and relay protocol 2, as in 0.7.1. Hooks run
+the new binary at their next invocation after reinstalling. A hook killed
+between the rename and the removal leaves an empty
+`<db>.startup-<session hash>.taken-<random>`; like the startup sidecar, it is
+safe to remove when the session is not running. A running `pager mcp` reports
+0.7.1 until restarted; this fix is in the per-event hook binary.
+
 ## 0.7.1 — 2026-11-08
 
 ### Fixed
