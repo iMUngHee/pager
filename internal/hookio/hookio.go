@@ -16,6 +16,7 @@ package hookio
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -198,14 +199,29 @@ func Run(ctx context.Context, event string, stdin io.Reader, stdout io.Writer) {
 // startupDeliveryCredit records or atomically consumes one startup delivery.
 // The empty sidecar is isolated by database and exact session, so this
 // transient handshake needs no store migration and holds no message content.
+//
+// Consuming renames the sidecar to a name only this call knows, then removes
+// that. os.Remove alone is not an atomic take: on macOS (APFS) concurrent
+// unlinks of one path can each report success. The removal that follows the
+// rename races nobody, and only the call whose name still holds the file can
+// remove it, so at most one call takes the credit. What cannot be removed is
+// put back, so it stays in the way of the next startup's credit as before.
 func startupDeliveryCredit(path, session string, remember bool) (bool, error) {
 	marker := fmt.Sprintf("%s.startup-%x", path, sha256.Sum256([]byte(session)))
 	if !remember {
-		err := os.Remove(marker)
+		claim := marker + ".taken-" + rand.Text()
+		err := os.Rename(marker, claim)
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
-		return err == nil, err
+		if err != nil {
+			return false, err
+		}
+		if err := os.Remove(claim); err != nil {
+			_ = os.Rename(claim, marker)
+			return false, err
+		}
+		return true, nil
 	}
 	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {

@@ -72,16 +72,19 @@ unchanged exchange; missing activity is unknown and never a reason to pause.
 Codex runs SessionStart before UserPromptSubmit in a newly loaded turn. When
 SessionStart delivers mail, pager records one startup-delivery credit in an
 empty sidecar beside the selected database (`<db>.startup-<session hash>`).
-The following prompt atomically removes it, so that turn can reach the model
-even though its mail has already been confirmed. A genuine prompt consumes the
+The following prompt atomically takes it, by renaming it to a name only that
+hook knows and then removing that (on macOS, concurrent removals of one path
+can all report success; a rename succeeds once), so that turn can reach the
+model even though its mail has already been confirmed. A genuine prompt consumes the
 credit too; a new SessionStart discards an abandoned one. Later consumed pokes
 still block. If the credit cannot be stored, startup mail is left unconfirmed
 for retry rather than letting the following wake discard it; the mail can be
 delivered again after its lease expires. The transient
 sidecar holds no message content and changes neither the store schema nor the
 relay protocol. Older binaries ignore it. A crash before the next prompt may
-leave a sidecar until that session starts again; removing it is safe when the
-session is not running.
+leave a sidecar until that session starts again, and a hook killed between
+that rename and the removal leaves `<db>.startup-<session hash>.taken-<random>`;
+removing either is safe when the session is not running.
 
 Check this sequence against a real Codex host and an isolated local model:
 

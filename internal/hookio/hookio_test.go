@@ -229,6 +229,9 @@ func TestStartupCreditIsIsolatedAndConsumedAtomically(t *testing.T) {
 	if taken != 1 {
 		t.Fatalf("credit consumed %d times, want exactly once", taken)
 	}
+	if left, err := filepath.Glob(path + ".startup-*"); err != nil || len(left) != 0 {
+		t.Fatalf("consuming the credit left sidecars behind: %v %v", left, err)
+	}
 }
 
 func TestStartupCreditFailureLeavesMailUnread(t *testing.T) {
