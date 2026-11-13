@@ -155,7 +155,8 @@ CLI는 `internal/sessionref`에서 다음 순위를 따른다. Codex MCP는 위�
 당시에는 유일했던 축약이 몇 주 전에 끝난 세션의 이름과 부딪히기 시작하고, 그 분자는 시간이
 지날수록 커지기만 한다.
 
-`live substring`이 staleness 기준(`heartbeat_at >= now - staleAfter`)을 걸어 살아있는 이름만
+`live substring`은 기본 명부와 같은 presence 판정을 사용하여 최근 훅 기록이 있거나 런타임에서
+실행을 확인한 이름만
 본다. 여기서 여러 건이 나오면 **다음 tier로 넘어가지 않고 실패한다** — 살아있는 이름끼리
 겹치는 것은 사람이 답할 진짜 질문이고, 범위를 넓히면 아무도 기다리지 않는 이름만 후보에
 더해질 뿐이다.
@@ -236,7 +237,7 @@ SELECT session_id FROM sessions
 
 | 상황 | 결과 |
 | --- | --- |
-| 호스트 재시작 | pid 또는 start가 달라져 **새 키**. 이전 행은 아무 호출자와도 매칭되지 않는 잔여물이 되고, stale 판정으로 별칭 claim 대상이 된다 |
+| 호스트 재시작 | pid 또는 start가 달라져 **새 키**. 이전 키로는 호출자와 매칭되지 않는다. 회수는 별도 판정이다. 전용 호스트 종료 확인 시 허용하고, 오래된 미확인 상태는 `--allow-unknown`이 필요하며 loaded Codex thread는 보호한다 |
 | 같은 호스트에서 `/clear`·resume | pid 동일, session_id 변경 → 키 이전으로 **새 세션이 승계**. 이전 세션 행은 host_* 가 NULL이 되어 3순위로 도달 불가 |
 | 같은 프로젝트에서 claude와 codex 동시 | `host_client`가 달라 키가 다르다 → 서로 간섭 없음 |
 | 같은 툴 인스턴스 2개 (다른 창) | pid가 달라 키가 다르다 → 서로 간섭 없음 |
@@ -286,3 +287,15 @@ import한다. 위 표는 버전을 올릴 때의 판단 근거다 — 특히 sys
   1·2순위만 동작한다.
 
 전부 fail-closed 방향이고, 첫 번째와 두 번째는 CLI 발신이 통째로 막히면서 즉시 드러난다.
+
+## 런타임 상태와 호출자 인증의 분리
+
+12시간 기준은 hook 최근성일 뿐 종료 판정이 아닙니다. Codex의 기존 managed daemon 제어
+소켓을 읽기 전용으로 조회하며 `active`·`idle`인 thread는 오래된 hook이나 NULL host 키에도
+명부와 live-substring 후보에 남습니다. `notLoaded`·조회 오류·누락은 종료 증거가 아닙니다.
+호출자 인증에 쓰는 기존 host 키 유일성, 키 이전 및 freshness 조건은 유지합니다.
+
+기본 claim과 고아 수신함 추천은 주인 부재 또는 전용 Claude 호스트 종료 확인이 필요합니다.
+오래된 미확인 주인만 `--allow-unknown`으로 명시적으로 교체할 수 있습니다. claim은 조회 후
+UPDATE에서 주인·lease 세대·heartbeat·host 키·workspace/tool을 다시 비교해 기록이 바뀌면
+거부합니다. 런타임 자체의 변화와 SQLite 쓰기를 하나의 트랜잭션으로 동기화하지는 않습니다.

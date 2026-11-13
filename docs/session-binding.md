@@ -180,8 +180,11 @@ ones too. An abbreviation that was unique when learned then starts colliding
 with the name of a session that ended weeks ago, and that denominator only
 grows with time.
 
-`live substring` applies a staleness bound (`heartbeat_at >= now - staleAfter`)
-so it sees only live names. Several matches here **fail rather than falling
+`live substring` uses the same presence classifier as the default roster:
+recent hook records or positive runtime availability. Twelve-hour recency is not
+a termination test. A loaded Codex thread (`active`/`idle`) remains eligible with
+an old hook or a NULL host key; a shared daemon alone proves no thread's presence.
+Old unknown sessions remain exactly addressable and appear with `who --all`. Several matches here **fail rather than falling
 through to the next tier** — overlap among live names is a real question for a
 human to answer, and widening the scope would only add candidates nobody is
 waiting behind.
@@ -274,11 +277,27 @@ refused.
 
 | Situation | Result |
 | --- | --- |
-| Host restart | pid or start differs, so it is a **new key**. The old row becomes residue matching no caller, and its staleness makes its alias claimable |
+| Host restart | pid or start differs, so it is a **new key**. The old row matches no caller through that key. Claiming is separate: a proven-gone dedicated host permits it; stale unknown requires `--allow-unknown`, and loaded Codex threads remain protected |
 | `/clear` or resume on the same host | Same pid, new session_id → key transfer, so **the new session inherits**. The old session's row has NULL host_\* and is unreachable via tier 3 |
 | claude and codex at once in the same project | `host_client` differs, so the keys differ → no interference |
 | Two instances of the same tool (different windows) | pids differ, so the keys differ → no interference |
 | One session across several workspaces | Irrelevant, since session_id is the axis. Alias isolation is guaranteed separately by `root + tool` |
+
+## Runtime presence is separate from caller identity
+
+The unique host-key transfer and freshness checks above still authorize callers;
+they do not decide whether an individual Codex thread ended. Discovery reads the
+existing managed daemon's canonical control socket without starting a server or
+loading a thread. Only observed `active`/`idle` states confirm availability.
+`notLoaded`, errors and missing results remain unknown. Dedicated Claude host
+processes use the existing exact start-token probe. Default claim/orphan policy
+requires an unheld inbox or a proven-gone dedicated holder, independently of hook
+age. An explicit `--allow-unknown` applies only to a stale unknown holder.
+
+After observing the holder, claim compares holder, lease generation, heartbeat,
+host key and recorded workspace/tool in its conditional UPDATE. Recorded changes
+during observation refuse the claim; runtime changes without a new recorded
+snapshot are not transactionally synchronized with this write.
 
 ## fail-closed
 

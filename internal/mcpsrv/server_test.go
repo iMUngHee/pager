@@ -760,7 +760,7 @@ func TestRosterSaysWhenNobodyIsActive(t *testing.T) {
 	st := newStore(t)
 	s := start(t, st)
 
-	if got := roster(t, s, 2); !strings.Contains(got, "no sessions are active") {
+	if got := roster(t, s, 2); !strings.Contains(got, "no recent or confirmed available sessions") {
 		t.Errorf("an empty roster rendered %q", got)
 	}
 }
@@ -897,5 +897,26 @@ func TestRosterListsPeers(t *testing.T) {
 	got := roster(t, s, 2)
 	if !strings.Contains(got, "\npeers: vm (no relay seen)") {
 		t.Errorf("msg_roster lacks the peer line:\n%s", got)
+	}
+}
+
+func TestRosterAllKeepsUnknownHistoryDistinct(t *testing.T) {
+	st := newStore(t)
+	seed(t, st, "old", "historic-box")
+	if _, err := st.Exec(t.Context(), "UPDATE sessions SET heartbeat_at=? WHERE session_id='old'", st.Now()-(27*time.Hour).Milliseconds()); err != nil {
+		t.Fatal(err)
+	}
+	s := start(t, st)
+	current := roster(t, s, 2)
+	if strings.Contains(current, "historic-box") || !strings.Contains(current, "1 older session(s) have unknown presence") {
+		t.Fatalf("default=%s", current)
+	}
+	response := s.call(3, "tools/call", map[string]any{"name": "msg_roster", "arguments": map[string]any{"all": true}})
+	if isError(t, response) {
+		t.Fatalf("all failed: %v", response)
+	}
+	all := text(t, response)
+	if !strings.Contains(all, "historic-box") || !strings.Contains(all, "THREAD") || !strings.Contains(all, "unknown") {
+		t.Fatalf("all=%s", all)
 	}
 }

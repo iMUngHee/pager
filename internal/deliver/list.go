@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/store"
 )
 
@@ -255,6 +256,7 @@ func SenderTool(ctx context.Context, st *store.Store, session string) (string, e
 
 // RosterEntry is one session as `pager who` shows it.
 type RosterEntry struct {
+	State     presence.State
 	SessionID string
 	// Name is what the session is addressed by: the name it is known by, or
 	// its session id when it has none yet. The fallback matches SenderLabel,
@@ -266,11 +268,8 @@ type RosterEntry struct {
 	// when a hook runs, so it answers "have I heard from this session lately"
 	// and nothing more.
 	LastSeen int64
-	// HostPid and HostStart identify the session's host process, and are what
-	// liveness is actually decided from. Reported rather than judged, on
-	// Inbox's reasoning: both are zero when no host was ever detected, which is
-	// not the same as the process being gone. A caller pairs them with a
-	// HostProbe.
+	// HostPid and HostStart identify the recorded process, which may host
+	// multiple Codex threads. Missing identity is unknown, not gone.
 	HostPid   int
 	HostStart int64
 	// Purpose is the last thing a person asked this session to do, folded to
@@ -283,88 +282,91 @@ type RosterEntry struct {
 	Purpose string
 }
 
-// Roster lists the sessions heard from within staleAfter, most recently active
-// first.
-//
-// That is membership, and it is not liveness. The cutoff reads heartbeat_at,
-// which advances only when a hook runs, so at the twelve-hour default a session
-// whose process exited minutes ago is still in this list — measured at 4 of 8
-// rows on a live database. Sessions older than the cutoff are dropped rather
-// than shown greyed, because a session nothing has been heard from in half a day
-// cannot be relied on to read anything.
-//
-// What answers "can this one still read it" is the host pair on each entry, put
-// through a HostProbe. FormatRoster prints both, in separate columns, for that
-// reason.
-func Roster(ctx context.Context, st *store.Store, staleAfter time.Duration) ([]RosterEntry, error) {
-	rows, err := st.DB().QueryContext(ctx, `
-		SELECT s.session_id,
-		       COALESCE((SELECT a.alias FROM aliases a WHERE a.session_id = s.session_id
-		                  `+primaryAliasOrder+` LIMIT 1), s.session_id),
-		       s.tool, s.root, s.heartbeat_at,
-		       COALESCE(s.host_pid, 0), COALESCE(s.host_start, 0),
-		       COALESCE(s.purpose, '')
-		  FROM sessions s
-		 WHERE s.heartbeat_at >= ?
-		 ORDER BY s.heartbeat_at DESC, s.session_id`,
-		st.Now()-staleAfter.Milliseconds())
-	if err != nil {
-		return nil, fmt.Errorf("list sessions: %w", err)
-	}
-	defer rows.Close()
-
-	var out []RosterEntry
-	for rows.Next() {
-		var e RosterEntry
-		if err := rows.Scan(&e.SessionID, &e.Name, &e.Tool, &e.Root, &e.LastSeen,
-			&e.HostPid, &e.HostStart, &e.Purpose); err != nil {
-			return nil, fmt.Errorf("list sessions: %w", err)
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
+// RosterView includes the visible rows and a count of old unknown sessions.
+type RosterView struct {
+	Entries       []RosterEntry
+	HiddenUnknown int
 }
 
-// FormatRoster renders the roster the one way it is shown, to `pager who` and
-// to the msg_roster MCP tool alike.
-//
-// Sharing the rendering rather than only the rows is the lesson Presence's
-// comment records: the CLI and the MCP server each wrote their own sentence for
-// the same fact once, and the two drifted because nobody read both. A roster
-// that disagreed with itself across the two surfaces would be worse, since the
-// answer is a name someone is about to address.
-//
-// The probe is injected for the reason HostProbe's own comment gives — deliver
-// reads the database, never process state — and taking it per call also keeps
-// every HOST word reachable from a test.
-//
-// withPurpose is what separates the two readers rather than two renderers. The
-// CLI leaves it off: `pager who` already prints 116-column rows into an
-// 80-column terminal, and a sixth column takes that to 158, so a person reading
-// the table would pay for a field they did not ask for. An MCP result is a text
-// block with no width budget, and the agent reading it is the one that has to
-// work out who owns the thing it just changed. The wording stays in one place
-// either way, which is the point.
-func FormatRoster(entries []RosterEntry, now int64, probe HostProbe, withPurpose bool) string {
-	if len(entries) == 0 {
-		return "no sessions are active\n"
+type RosterOptions struct {
+	All   bool
+	Probe presence.Probe
+}
+
+// Roster separates recorded hook age from runtime evidence. All retains history;
+// otherwise old unknown rows are counted, never described as terminated.
+func Roster(ctx context.Context, st *store.Store, staleAfter time.Duration, options ...RosterOptions) (RosterView, error) {
+	var opts RosterOptions
+	if len(options) > 0 {
+		opts = options[0]
 	}
-	var sb strings.Builder
-	tw := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
-	header := "NAME\tTOOL\tROOT\tHOST\tLAST"
-	if withPurpose {
-		header += "\tPURPOSE"
+	if opts.Probe == nil {
+		opts.Probe = presence.NewProbe()
 	}
-	fmt.Fprintln(tw, header)
-	for _, e := range entries {
-		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", e.Name, e.Tool, e.Root,
-			HostState(probe(e.HostPid, e.HostStart)), ago(now, e.LastSeen))
-		if withPurpose {
-			row += "\t" + e.Purpose
+	rows, err := st.DB().QueryContext(ctx, `
+  SELECT s.session_id,
+         COALESCE((SELECT a.alias FROM aliases a WHERE a.session_id = s.session_id
+                    `+primaryAliasOrder+` LIMIT 1), s.session_id),
+         s.tool, s.root, s.heartbeat_at,
+         COALESCE(s.host_pid, 0), COALESCE(s.host_start, 0),
+         COALESCE(s.purpose, '')
+    FROM sessions s
+   ORDER BY s.heartbeat_at DESC, s.session_id`)
+	if err != nil {
+		return RosterView{}, fmt.Errorf("list sessions: %w", err)
+	}
+	var entries []RosterEntry
+	for rows.Next() {
+		var e RosterEntry
+		if err := rows.Scan(&e.SessionID, &e.Name, &e.Tool, &e.Root, &e.LastSeen, &e.HostPid, &e.HostStart, &e.Purpose); err != nil {
+			rows.Close()
+			return RosterView{}, fmt.Errorf("list sessions: %w", err)
 		}
-		fmt.Fprintln(tw, row)
+		entries = append(entries, e)
 	}
-	tw.Flush()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return RosterView{}, err
+	}
+	var view RosterView
+	for _, e := range entries {
+		session := presence.Session{ID: e.SessionID, Tool: e.Tool, Heartbeat: e.LastSeen, HostPID: e.HostPid, HostStart: e.HostStart}
+		e.State = presence.Classify(session, opts.Probe(ctx, session), st.Now(), staleAfter)
+		if opts.All || e.State.Visible() {
+			view.Entries = append(view.Entries, e)
+		} else if !e.State.Gone {
+			view.HiddenUnknown++
+		}
+	}
+	return view, nil
+}
+
+// FormatRoster is shared by CLI and MCP. Existing HOST/LAST positions are kept;
+// THREAD describes the observed Codex thread, independently of its host process.
+func FormatRoster(view RosterView, now int64, withPurpose bool) string {
+	var sb strings.Builder
+	if len(view.Entries) == 0 {
+		sb.WriteString("no recent or confirmed available sessions\n")
+	} else {
+		tw := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
+		header := "NAME\tTOOL\tROOT\tHOST\tLAST\tTHREAD"
+		if withPurpose {
+			header += "\tPURPOSE"
+		}
+		fmt.Fprintln(tw, header)
+		for _, e := range view.Entries {
+			row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", e.Name, e.Tool, e.Root, e.State.Host, ago(now, e.LastSeen), e.State.Thread)
+			if withPurpose {
+				row += "\t" + e.Purpose
+			}
+			fmt.Fprintln(tw, row)
+		}
+		tw.Flush()
+	}
+	if view.HiddenUnknown > 0 {
+		fmt.Fprintf(&sb, "%d older session(s) have unknown presence; use pager who --all or an exact alias. Old hooks do not prove termination.\n", view.HiddenUnknown)
+	}
 	return sb.String()
 }
 

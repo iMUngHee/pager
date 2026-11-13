@@ -46,7 +46,8 @@ note: <이름> was not poked — it will be delivered on its next activity
 
 ### 이름 뒤에 아무도 없을 때
 
-두드리기 결과보다 **먼저** 확인하는 것이 있다. 그 이름을 들고 있는 세션의 프로세스가 아직 도는가.
+두드리기 결과 전에 이름의 주인이 없거나 전용 호스트가 종료됐는지 확인한다. Codex 공유 daemon의
+프로세스 상태만으로 개별 thread가 종료됐다고 판정하지 않는다.
 
 ```
 note: <이름>'s session is gone — the message waits, but nothing will read it
@@ -63,11 +64,10 @@ note: <이름>'s session is gone — the message waits, but nothing will read it
 않는다.** 붙을 때 호스트 탐지가 실패한 세션은 죽은 게 아니라 모르는 것이고, 근거 없이 부재를
 주장하면 살아있는 알림을 숨기게 된다. 확실할 때만 이 줄이 나온다.
 
-호스트가 죽었어도 두드리기는 한다. 재시작한 Codex 는 세션을 새 app-server 프로세스 아래에서
-돌리는데, 기록은 그 세션의 첫 훅에서야 따라오고 첫 훅은 다음 턴을 기다린다. 그 사이에는 수신자가
-죽은 것으로 읽히지만 스레드는 큐에 넣은 두드리기를 받는다. 그래서 일단 두드린다: 닿은 두드리기
-(`woken`, `coalesced`)는 두드리기 결과로 보고하고, 살아있는 상대만 낼 수 있는 거부(`refused`)는 진단을
-남기되 다음 활동을 약속하지 않으며, 그 밖에는 위의 줄을 낸다.
+전용 호스트의 종료가 확인돼도 두드리기는 한다. 닿은 결과(`woken`, `coalesced`)가 기존
+호스트 기록보다 강한 증거이므로 두드리기 결과로 보고한다. 살아있는 endpoint의 거부는 진단을
+남기되 다음 활동을 약속하지 않고, 다른 결과에는 위의 줄을 유지한다. Codex 호스트 종료만으로
+개별 thread 종료를 판정하지 않으므로 그 사실만으로 stranded 진단을 만들지 않는다.
 
 CLI 와 MCP `msg_send` 는 **같은 문장**을 낸다. 문장은 `deliver.Presence.Note` 한 곳에서 온다.
 
@@ -120,9 +120,9 @@ CLI 와 MCP `msg_send` 는 **같은 문장**을 낸다. 문장은 `deliver.Prese
 `msg_roster`만 CLI에 없는 것을 낸다 — `pager who`와 같은 컬럼에 **`PURPOSE` 하나를 더** 붙인다.
 
 ```
-NAME  TOOL    ROOT       HOST  LAST      PURPOSE
-gupa  claude  ~/.config  live  just now  tmux 뱃지 다시 만들어줘
-suzu  claude  ~/.config  live  4m ago    zsh 자동완성 추가
+NAME  TOOL    ROOT       HOST  LAST      THREAD   PURPOSE
+gupa  claude  ~/.config  live  just now  unknown  tmux 뱃지 다시 만들어줘
+suzu  claude  ~/.config  live  4m ago    unknown  zsh 자동완성 추가
 ```
 
 - **`PURPOSE`는 그 세션이 마지막으로 받은 사람의 지시**다. `UserPromptSubmit` 훅이 프롬프트를
@@ -181,22 +181,24 @@ pager relay wait --peer vm               # transport 쪽: 나갈 메일이 생�
 ### `pager who` — 누구에게 보낼 수 있나
 
 ```
-NAME  TOOL    ROOT                      HOST     LAST
-gupa  claude  ~/Projects/portal/main    live     just now
-suzu  codex   ~/.config                 gone     8m ago
-hica  claude  ~/Projects/pager          unknown  21m ago
+NAME  TOOL    ROOT                      HOST     LAST      THREAD
+gupa  claude  ~/Projects/portal/main    live     just now  unknown
+suzu  codex   ~/.config                 unknown  27h ago   idle
+hica  claude  ~/Projects/pager          unknown  21m ago   unknown
 ```
 
 MCP `msg_roster`가 내는 것과 **같은 표다.** 렌더링이 한 곳에서 오므로 두 표면이 같은 질문에
 다르게 답할 수 없다.
 
-- **목록에 있다는 것과 살아있다는 것은 다르다.** 목록 기준은 `heartbeat_at`이고 기본 임계는
-  12시간이라, 몇 분 전에 죽은 세션도 반나절 동안 남아 있다(실측: 8행 중 4행). 그래서 `HOST`가
-  따로 있다 — 판정 근거와 세 단어의 뜻은 아래 `pager inbox` 항목과 같다.
-- `LAST`는 마지막 훅이 언제 돌았나일 뿐이다. 긴 턴 중인 세션은 오래돼 보이고, 방금 죽은 세션은
-  최근으로 보인다. **보낼지 말지는 `HOST`로 판단한다.**
-- 죽은 세션도 숨기지 않는다. 이름 뒤에 아무도 없는 수신함은 `pager claim`으로 이어받는 대상이고,
-  숨기면 그 후보가 안 보인다.
+- 기본 명부는 최근 훅(기본 12시간)과 오래됐어도 런타임에서 실행을 확인한 세션을 포함한다.
+  최근 행은 기존 HOST 진단도 유지한다.
+- `LAST`는 훅 이후 시간일 뿐이다. Codex `THREAD=active/idle`은 loaded 상태를 확인한다.
+  공유 `HOST=live/gone`만으로 개별 thread의 실행·종료를 판정할 수 없다. `notLoaded`·누락·오류는
+  미확인 상태로 남는다.
+- 오래된 미확인 세션은 별도 건수로 표시한다. `pager who --all`과 MCP `msg_roster(all=true)`로
+  과거 기록을 보며, 정확한 별칭으로는 계속 보낼 수 있다.
+- 기본 `pager claim`은 주인 부재·전용 호스트 종료 확인이 필요하다. `--allow-unknown`은 오래된
+  미확인 주인만 명시적으로 교체하고 최근 활동·실행 확인이 있는 주인은 거부한다.
 
 ### `pager inbox` — 전역 대기 현황
 
@@ -271,13 +273,15 @@ hica   2        unknown
 ### 별칭은 자동으로 넘어가지 않는다
 
 같은 레포에서 어제 쓰던 별칭을 오늘 세션이 물려받으면 그건 오배달이다. 이어받기는
-`pager claim`으로 **명시적으로** 한다. 이어받을 수 있는 수신함이 있으면 훅이 세션당 한 번 알려준다.
+`pager claim`으로 **명시적으로** 한다. 이어받을 수 있는 수신함이 있으면 훅이 세션당 한 번 알려준다. 훅이 오래됐다는 이유만으로 주인 부재를 추정하지 않는다.
+claim은 UPDATE에서 주인·lease 세대·heartbeat·host 키를 다시 비교해 조회 중 기록 변경을
+거부한다. 외부 런타임 자체를 잠그지는 않는다.
 
 ## 저장소 사이의 relay
 
 머신마다 자기 저장소를 쓰고, 위의 모든 것은 그 안에서만 일어난다. 다른 머신의 세션에 닿으려면 두
 저장소를 **peer**로 짝짓고, 직접 돌리는 무언가 — **transport** — 가 그 사이로 메일을 옮긴다.
-pager는 네트워크 연결을 열지 않는다. 줄을 읽고 쓸 뿐이다.
+pager는 원격 peer로 직접 연결하지 않는다. relay 줄은 transport가 옮긴다.
 
 ### 주소
 

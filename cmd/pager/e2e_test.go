@@ -283,7 +283,7 @@ func TestWhoPrintsTheColumnContract(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("who printed no rows:\n%s", out)
 	}
-	if got := strings.Fields(lines[0]); !slices.Equal(got, []string{"NAME", "TOOL", "ROOT", "HOST", "LAST"}) {
+	if got := strings.Fields(lines[0]); !slices.Equal(got, []string{"NAME", "TOOL", "ROOT", "HOST", "LAST", "THREAD"}) {
 		t.Errorf("header = %v, want NAME TOOL ROOT HOST LAST", got)
 	}
 	// LAST renders as two words ("just now", "5m ago"), so the row is read by
@@ -958,5 +958,33 @@ func TestE2ESendToUncheckableHolderKeepsTheOldBehaviour(t *testing.T) {
 	out := mustRun(t, "send", "--human", "unknown-box", "hello")
 	if strings.Contains(out, "session is gone") {
 		t.Errorf("a session whose host was never detected was reported as gone:\n%s", out)
+	}
+}
+
+func TestWhoHistoryAndExplicitUnknownClaim(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	t.Setenv("PAGER_CLIENT", "none")
+	name := nameFromOutput(t, mustRun(t, "attach", "--session", "old", "--tool", "claude", "--root", dir))
+	st := openDB(t, filepath.Join(dir, "msg.db"))
+	if _, err := st.Exec(t.Context(), "UPDATE sessions SET heartbeat_at=? WHERE session_id='old'", st.Now()-(27*time.Hour).Milliseconds()); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRun(t, "who")
+	if strings.Contains(out, name) || !strings.Contains(out, "1 older session(s) have unknown presence") {
+		t.Fatalf("default: %s", out)
+	}
+	all := mustRun(t, "who", "--all")
+	if !strings.Contains(all, name) || !strings.Contains(all, "THREAD") || !strings.Contains(all, "unknown") {
+		t.Fatalf("all: %s", all)
+	}
+	mustRun(t, "attach", "--session", "new", "--tool", "claude", "--root", dir)
+	if _, err := capture(t, "", "claim", name, "--session", "new"); err == nil {
+		t.Fatal("default claim took unknown holder")
+	}
+	mustRun(t, "claim", name, "--allow-unknown", "--session", "new")
+	var holder string
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT session_id FROM aliases WHERE alias=?", name).Scan(&holder); err != nil || holder != "new" {
+		t.Fatalf("holder=%s err=%v", holder, err)
 	}
 }

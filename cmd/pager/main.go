@@ -41,10 +41,10 @@ var commands = []command{
 	{"send", "<target> <body> [--human] [--session <id>] [--label <name>]", "Leave a message for another session", send},
 	{"attach", "[--session <id>] [--tool <tool>] [--root <dir>] [--pm-ref <ref>]", "Register this session as a delivery target", attach},
 	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
-	{"claim", "<name> [--session <id>]", "Take over an alias whose session is offline", claim},
+	{"claim", "<name> [--session <id>] [--allow-unknown]", "Take over an unheld or proven-gone inbox", claim},
 	{"ls", "[--waiting] [--expired] [--session <id>]", "List messages addressed to this session", list},
 	{"inbox", "", "List every inbox with mail waiting in it", inbox},
-	{"who", "", "List the sessions to page, and whether each host is still there", who},
+	{"who", "[--all]", "List recent or runtime-confirmed sessions; --all includes history", who},
 	{"whoami", "[--session <id>]", "Show the session this invocation resolves to", whoami},
 	{"export", "", "Write every stored message to stdout as JSONL", export},
 	{"prune", "[--dry-run]", "Delete messages past the retention window", prune},
@@ -173,6 +173,7 @@ func alias(args []string) error {
 // claim takes over an alias whose holder is gone.
 func claim(args []string) error {
 	fs := flag.NewFlagSet("claim", flag.ContinueOnError)
+	allowUnknown := fs.Bool("allow-unknown", false, "deliberately take over a stale holder whose presence is unknown")
 	session := fs.String("session", "", "session id taking over")
 	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
@@ -192,12 +193,12 @@ func claim(args []string) error {
 	if err != nil {
 		return err
 	}
-	ok, err := deliver.ClaimAlias(ctx, st, fs.Arg(0), id, store.DefaultStale)
+	ok, err := deliver.ClaimAlias(ctx, st, fs.Arg(0), id, store.DefaultStale, deliver.ClaimOptions{AllowUnknown: *allowUnknown})
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("cannot take over %q: it does not exist, its holder is still active, or it belongs to another workspace", fs.Arg(0))
+		return fmt.Errorf("cannot take over %q: it does not exist, its holder is available/recent/unknown, the recorded holder changed, or it belongs to another workspace; --allow-unknown permits only stale unknown holders", fs.Arg(0))
 	}
 	fmt.Printf("%s is now yours\n", fs.Arg(0))
 	return nil
@@ -486,6 +487,7 @@ func attach(args []string) error {
 // cannot answer the same question differently.
 func who(args []string) error {
 	fs := flag.NewFlagSet("who", flag.ContinueOnError)
+	all := fs.Bool("all", false, "include historical sessions whose presence is unconfirmed")
 	if err := fs.Parse(permute(fs, args)); err != nil {
 		return err
 	}
@@ -497,7 +499,7 @@ func who(args []string) error {
 	}
 	defer st.Close()
 
-	entries, err := deliver.Roster(ctx, st, store.DefaultStale)
+	entries, err := deliver.Roster(ctx, st, store.DefaultStale, deliver.RosterOptions{All: *all})
 	if err != nil {
 		return err
 	}
@@ -505,7 +507,7 @@ func who(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(deliver.FormatRoster(entries, st.Now(), sessionref.AliveAt, false))
+	fmt.Print(deliver.FormatRoster(entries, st.Now(), false))
 	fmt.Print(deliver.FormatPeerFooter(peers, st.Now()))
 	return nil
 }

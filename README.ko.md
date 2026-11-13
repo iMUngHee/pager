@@ -110,7 +110,8 @@ pager whoami                       # 내 세션과 내 이름
 
 | 명령 | 답해주는 것 |
 | --- | --- |
-| `pager who` | 누구에게 보낼 수 있고, 그 이름 뒤에 실제로 누가 있나 |
+| `pager who` | 최근 세션과 런타임에서 실행을 확인한 오래된 세션 |
+| `pager who --all` | 현재 상태를 확인하지 못한 과거 세션까지 보기 |
 | `pager send <이름> "…"` | 보내기 |
 | `pager send <이름>@<peer> "…"` | 다른 저장소의 세션에게 보내기 (relay가 실어 나른다) |
 | `pager ls` | 내 앞으로 온 것 |
@@ -118,8 +119,23 @@ pager whoami                       # 내 세션과 내 이름
 | `pager inbox` | 세션 무관, 메일이 밀려 있는 수신함 전부 |
 | `pager whoami` | 내 세션과 내 이름 |
 | `pager alias <이름>` | 이름 직접 정하기 |
-| `pager claim <이름>` | 세션이 떠난 수신함 이어받기 |
+| `pager claim <이름>` | 주인이 없거나 전용 호스트의 종료를 확인한 수신함 이어받기 |
+| `pager claim <이름> --allow-unknown` | 오래된 미확인 주인을 명시적으로 교체. 최근 활동·실행 확인 시에는 거부 |
 | `pager export` | 저장소 전체를 JSONL로 |
+
+`LAST`는 마지막 훅 이후 시간이며 세션 종료 시한이 아닙니다. `HOST`는 기록된 프로세스만
+나타내고, Codex의 여러 thread가 한 daemon을 공유할 수 있습니다. `THREAD`는 실행 중인
+Codex managed daemon을 읽기 전용으로 조회한 결과입니다. `active`·`idle`이면 오래된 세션도
+명부에 남습니다. `notLoaded`·결과 누락·조회 실패는 종료 증거가 아닙니다. 기본 명부는 오래된
+미확인 세션의 건수를 알리며, `--all` 또는 정확한 별칭으로 과거 세션에 접근할 수 있습니다.
+MCP `msg_roster`도 같은 정책이며 `all: true`를 받습니다.
+
+상태 조회는 daemon 시작, thread resume/archive, 훅 기반 호출자 인증 변경을 수행하지 않습니다.
+런타임 조회와 SQLite 쓰기가 하나의 트랜잭션은 아닙니다. 별칭 회수는 쓰는 순간 소유자·lease
+세대·heartbeat·host 키를 다시 비교하여 조회 중 기록이 바뀌면 거부합니다. 오래된 미확인 주인은
+명시적 override가 필요하며 고아 수신함으로 자동 추천하지 않습니다. Codex 조회는 `CODEX_HOME`
+(기본 `~/.codex`) 아래 기존 제어 소켓만 사용하며 제한 시간은 1초입니다. 연결할 수 없으면
+thread 상태는 미확인으로 남습니다. 플랫폼 검증 범위는 PLATFORMS.md를 참고하세요.
 
 ## 에이전트 안에서 쓰기 (선택)
 
@@ -137,7 +153,7 @@ codex  mcp add pager       -- pager mcp
 ## 다른 머신의 세션 (선택)
 
 머신마다 자기 저장소를 따로 씁니다. 다른 머신의 세션에 닿으려면 두 저장소를 짝지어 두고, 직접
-돌리는 전송 수단(transport)이 그 사이로 메일을 옮기게 합니다 — pager 자신은 연결을 열지
+돌리는 전송 수단(transport)이 그 사이로 메일을 옮기게 합니다 — pager 자신은 원격 머신으로 연결을 열지
 않습니다:
 
 ```bash

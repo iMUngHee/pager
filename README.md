@@ -116,7 +116,8 @@ states the exact terms.
 
 | Command | What it answers |
 | --- | --- |
-| `pager who` | Who can I send to, and is anyone actually behind that name? |
+| `pager who` | Recent sessions and older sessions confirmed available by the runtime. |
+| `pager who --all` | Include session history whose current presence is unknown. |
 | `pager send <name> "…"` | Send. |
 | `pager send <name>@<peer> "…"` | Send to a session in another store, carried by a relay. |
 | `pager ls` | What came to me. |
@@ -124,8 +125,26 @@ states the exact terms.
 | `pager inbox` | Which inboxes have mail waiting, across all sessions. |
 | `pager whoami` | Which session am I, and what is my name? |
 | `pager alias <name>` | Choose my own name. |
-| `pager claim <name>` | Take over an inbox whose session is gone. |
+| `pager claim <name>` | Take over an unheld inbox or one whose dedicated host is confirmed gone. |
+| `pager claim <name> --allow-unknown` | Deliberately take over a stale unknown holder; a recent or available holder is still refused. |
 | `pager export` | Dump the whole store as JSONL. |
+
+`LAST` is the time since a hook ran, not a session timeout. `HOST` describes the
+recorded process; several Codex threads can share one daemon. `THREAD` reports a
+read-only observation from the existing Codex managed daemon: `active` and `idle`
+keep even old sessions visible. `notLoaded`, missing results and failed runtime
+queries do not prove termination. The default list counts old unknown sessions;
+use `--all` or address an exact alias to reach their history. MCP `msg_roster`
+uses the same policy and accepts `all: true`.
+
+Presence checks never start a daemon, resume/archive threads, or change the
+hook-based caller-authentication rules. The runtime snapshot and SQLite are not
+one transaction: alias claims compare the recorded holder, lease generation,
+heartbeat and host key again when writing, rejecting changes during the probe.
+An old unknown holder requires the explicit override; it is never an automatic
+orphan hint. The Codex observer uses its canonical local control socket under
+`CODEX_HOME` (default `~/.codex`), with a one-second budget. If unavailable, its
+thread evidence stays unknown. See PLATFORMS.md for validation limits.
 
 ## Using it from inside an agent (optional)
 
@@ -144,7 +163,7 @@ learns other names only from mail it receives — hence the roster.
 
 Each machine keeps its own store. To reach a session on another one, pair the
 two stores and let a transport you run carry mail between them — pager itself
-never opens a connection:
+does not open a connection to the remote machine:
 
 ```bash
 laptop$ pager peer add vm --store "$(ssh vm pager relay id)"

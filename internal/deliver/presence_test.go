@@ -1,6 +1,9 @@
 package deliver
 
 import (
+	"context"
+	"github.com/iMUngHee/pager/internal/presence"
+	"github.com/iMUngHee/pager/internal/store"
 	"strings"
 	"testing"
 )
@@ -124,5 +127,19 @@ func TestPresenceNoteDistinguishesItsTwoCases(t *testing.T) {
 	}
 	if strings.Contains(unheld, "gone") {
 		t.Error("the unheld note claims something is gone; nothing ever held that name")
+	}
+}
+
+func TestCodexSharedHostGoneDoesNotStrandThread(t *testing.T) {
+	st, _ := newStore(t)
+	if err := st.RecordSession(t.Context(), store.SessionRecord{ID: "codex", Tool: "codex", Root: workspace}); err != nil {
+		t.Fatal(err)
+	}
+	for _, thread := range []string{"idle", "active", "notLoaded", "unknown"} {
+		observe := func(context.Context, presence.Session) presence.Evidence { return presence.Evidence{Thread: thread} }
+		got, err := PresenceOf(t.Context(), st, Target{Alias: "codex", SessionID: "codex"}, fixedProbe(false, true), observe)
+		if err != nil || got != PresenceHeld {
+			t.Fatalf("thread=%s presence=%v err=%v", thread, got, err)
+		}
 	}
 }

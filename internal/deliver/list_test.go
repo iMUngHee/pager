@@ -1,12 +1,14 @@
 package deliver
 
 import (
+	"context"
 	"database/sql"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/store"
 )
 
@@ -148,7 +150,7 @@ func TestRosterNamesAndSkipsStale(t *testing.T) {
 		t.Fatalf("Roster: %v", err)
 	}
 	got := map[string]string{}
-	for _, e := range entries {
+	for _, e := range entries.Entries {
 		got[e.SessionID] = e.Name
 	}
 	if _, listed := got["gone"]; listed {
@@ -211,7 +213,10 @@ func TestFormatRosterRendersEveryColumn(t *testing.T) {
 		}
 	}
 
-	got := FormatRoster(entries, now, probe, false)
+	for i := range entries {
+		entries[i].State = presence.State{Evidence: presence.Evidence{Host: HostState(probe(entries[i].HostPid, entries[i].HostStart)), Thread: "unknown"}}
+	}
+	got := FormatRoster(RosterView{Entries: entries}, now, false)
 	for _, want := range []string{
 		"NAME", "TOOL", "ROOT", "HOST", "LAST",
 		"bavu", "claude", "/tmp/one", "live", "just now",
@@ -225,7 +230,7 @@ func TestFormatRosterRendersEveryColumn(t *testing.T) {
 
 	// An empty roster is a sentence, not a bare header: the CLI said so first
 	// and the MCP tool must not word it differently.
-	if empty := FormatRoster(nil, now, probe, false); empty != "no sessions are active\n" {
+	if empty := FormatRoster(RosterView{}, now, false); empty != "no recent or confirmed available sessions\n" {
 		t.Errorf("an empty roster rendered %q", empty)
 	}
 }
@@ -279,11 +284,11 @@ func TestRosterReadsAPreExistingSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Roster over a row with a NULL purpose: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("Roster returned %d entries, want 1", len(entries))
+	if len(entries.Entries) != 1 {
+		t.Fatalf("Roster returned %d entries, want 1", len(entries.Entries))
 	}
-	if entries[0].Purpose != "" {
-		t.Errorf("Purpose = %q for a session that never had one, want empty", entries[0].Purpose)
+	if entries.Entries[0].Purpose != "" {
+		t.Errorf("Purpose = %q for a session that never had one, want empty", entries.Entries[0].Purpose)
 	}
 }
 
@@ -313,7 +318,7 @@ func TestRosterCarriesTheHostColumns(t *testing.T) {
 		t.Fatalf("Roster: %v", err)
 	}
 	got := map[string]RosterEntry{}
-	for _, e := range entries {
+	for _, e := range entries.Entries {
 		got[e.SessionID] = e
 	}
 
@@ -715,5 +720,63 @@ func TestFilterFromPrefersExpired(t *testing.T) {
 			t.Errorf("FilterFrom(waiting=%v, expired=%v) = %d, want %d",
 				tc.waiting, tc.expired, got, tc.want)
 		}
+	}
+}
+
+func TestRosterAndSubstringKeepOldLoadedThreadsAfterHostKeyTransfer(t *testing.T) {
+	st, fake := newStore(t)
+	for _, id := range []string{"idle", "active", "history"} {
+		if err := st.RecordSession(t.Context(), store.SessionRecord{ID: id, Tool: "codex", Root: workspace, HostClient: "codex", HostPid: 4321, HostStart: 123}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustSetAlias(t, st, "project-idle", "idle")
+	mustSetAlias(t, st, "other-active", "active")
+	mustSetAlias(t, st, "project-history", "history")
+	fake.Advance(26*time.Hour + 31*time.Minute)
+	probe := func(_ context.Context, s presence.Session) presence.Evidence {
+		return presence.Evidence{Host: "live", Thread: map[string]string{"idle": "idle", "active": "active"}[s.ID]}
+	}
+	view, err := Roster(t.Context(), st, stale, RosterOptions{Probe: probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Entries) != 2 || view.HiddenUnknown != 1 {
+		t.Fatalf("view=%+v", view)
+	}
+	for _, e := range view.Entries {
+		if e.HostPid != 0 {
+			t.Fatalf("shared key should have moved off loaded session: %+v", e)
+		}
+		if !e.State.Available || e.State.Recent {
+			t.Fatalf("state=%+v", e.State)
+		}
+	}
+	target, err := ResolveTarget(t.Context(), st, "project", stale, probe)
+	if err != nil || target.SessionID != "idle" {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+	exact, err := ResolveTarget(t.Context(), st, "project-history", stale, probe)
+	if err != nil || exact.SessionID != "history" {
+		t.Fatalf("exact=%+v err=%v", exact, err)
+	}
+	if text := FormatRoster(view, st.Now(), false); !strings.Contains(text, "1 older session(s) have unknown presence") || !strings.Contains(text, "THREAD") {
+		t.Fatalf("roster=%s", text)
+	}
+	all, err := Roster(t.Context(), st, stale, RosterOptions{All: true, Probe: probe})
+	if err != nil || len(all.Entries) != 3 || all.HiddenUnknown != 0 {
+		t.Fatalf("all=%+v err=%v", all, err)
+	}
+}
+
+func TestFormatRosterIncludesPurposeOnlyWhenRequested(t *testing.T) {
+	view := RosterView{Entries: []RosterEntry{{Name: "named", Tool: "claude", Root: "/repo", LastSeen: 100, State: presence.State{Evidence: presence.Evidence{Host: "unknown", Thread: "unknown"}}, Purpose: "Review stored messages"}}}
+	with := FormatRoster(view, 100, true)
+	without := FormatRoster(view, 100, false)
+	if !strings.Contains(with, "PURPOSE") || !strings.Contains(with, "Review stored messages") {
+		t.Fatalf("purpose output=%s", with)
+	}
+	if strings.Contains(without, "PURPOSE") || strings.Contains(without, "Review stored messages") {
+		t.Fatalf("purpose leaked into compact roster=%s", without)
 	}
 }

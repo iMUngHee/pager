@@ -54,8 +54,9 @@ That path has no read step. Whether it actually landed is answered by
 
 ### When nobody is behind the name
 
-Before reporting the knock result, pager checks something else first: is the
-process of the session holding that name still running?
+Before reporting the knock result, pager checks whether the alias is unheld or
+its dedicated host is confirmed gone. A shared Codex daemon's process state
+cannot establish that its individual thread ended.
 
 ```
 note: <name>'s session is gone — the message waits, but nothing will read it
@@ -73,16 +74,14 @@ The verdict uses **pid plus a process start token** (`sessionref.Alive`), not a
 heartbeat — the same reason the `HOST` column in `pager inbox` does. And
 **pager does not claim absence when it cannot check the host.** A session whose
 host detection failed at attach time is unknown, not dead, and asserting
-absence without grounds would hide a live notification. The line appears only
-when pager is sure.
+absence without grounds would hide a live notification. The line applies only
+to a confirmed-gone dedicated holder; Codex thread absence is not inferred from a shared host probe.
 
-A gone host still gets the knock. A restarted Codex runs its sessions under a
-new app-server process, and the record follows only at the session's first
-hook, which waits for its next turn; until then the holder reads as gone while
-its thread still takes a queued poke. So pager knocks anyway: a knock that lands
-(`woken`, `coalesced`) is reported as the knock; a refusal, which only a live
-endpoint can give, keeps its diagnosis but promises no next activity; anything
-else prints the line above.
+A gone dedicated host still gets the knock. A knock that lands (`woken`,
+`coalesced`) is stronger evidence and is reported as the knock. A refusal from a
+live endpoint keeps its diagnosis without promising another activity; other
+outcomes retain the line above. Codex host disappearance stays unknown at the
+thread level, so it never creates that stranded diagnosis on its own.
 
 The CLI and MCP `msg_send` print the **same sentence**, from one place
 (`deliver.Presence.Note`).
@@ -149,9 +148,9 @@ three tools, `msg_roster` is the only one that shows something the CLI does
 not: the same columns as `pager who` plus **one more, `PURPOSE`**.
 
 ```
-NAME  TOOL    ROOT       HOST  LAST      PURPOSE
-gupa  claude  ~/.config  live  just now  rebuild the tmux badge
-suzu  claude  ~/.config  live  4m ago    add zsh completions
+NAME  TOOL    ROOT       HOST  LAST      THREAD   PURPOSE
+gupa  claude  ~/.config  live  just now  unknown  rebuild the tmux badge
+suzu  claude  ~/.config  live  4m ago    unknown  add zsh completions
 ```
 
 - **`PURPOSE` is the last human instruction that session received.** The
@@ -184,7 +183,7 @@ pager ls --expired                 # past the automatic delivery window and stil
 pager inbox                        # every inbox with mail waiting (session-independent)
 pager whoami                       # my session and my name
 pager alias review-box             # choose a name (in place of the automatic one)
-pager claim review-box             # take over an offline inbox
+pager claim review-box             # take over an unheld/proven-gone inbox
 pager prune --dry-run              # what is past retention
 pager export > backup.jsonl        # the whole store as JSONL
 pager version                      # release, and the commit or module version it was built from
@@ -217,25 +216,24 @@ saw it" and "it is in context now" are not the same statement.
 ### `pager who` — who you can send to
 
 ```
-NAME  TOOL    ROOT                      HOST     LAST
-gupa  claude  ~/Projects/portal/main    live     just now
-suzu  codex   ~/.config                 gone     8m ago
-hica  claude  ~/Projects/pager          unknown  21m ago
+NAME  TOOL    ROOT                      HOST     LAST      THREAD
+gupa  claude  ~/Projects/portal/main    live     just now  unknown
+suzu  codex   ~/.config                 unknown  27h ago   idle
+hica  claude  ~/Projects/pager          unknown  21m ago   unknown
 ```
 
 This is the **same table** MCP `msg_roster` produces. Rendering comes from one
 place, so the two surfaces cannot answer the same question differently.
 
-- **Being listed and being alive are different things.** Listing is based on
-  `heartbeat_at` with a 12-hour default threshold, so a session that died
-  minutes ago stays listed for half a day (measured: 4 of 8 rows). That is why
-  `HOST` exists separately — the verdict and the meaning of its three words are
-  described under `pager inbox` below.
-- `LAST` is only when the last hook ran. A session in a long turn looks stale,
-  and a session that just died looks recent. **Decide whether to send from
-  `HOST`.**
-- Dead sessions are not hidden. An inbox with nobody behind the name is what
-  `pager claim` is for, and hiding it would hide the candidate.
+- Membership includes recent hooks (12 hours by default) and older sessions
+  positively observed available. Recent rows still show HOST diagnostics.
+- `LAST` is only hook age. For Codex, `THREAD=active/idle` confirms a loaded
+  thread; a shared `HOST=live/gone` cannot establish an individual thread's
+  presence. `notLoaded`, missing results and failed lookups remain unknown.
+- Old unknown rows are counted separately. `pager who --all` or MCP
+  `msg_roster(all=true)` includes history; exact aliases stay addressable.
+- `pager claim` requires unheld/proven-gone. `--allow-unknown` deliberately
+  permits only stale unknown holders; recent or available holders are refused.
 
 ### `pager inbox` — what is waiting, everywhere
 
@@ -332,14 +330,17 @@ session's name.** Mail you leave for a handover does not lose its destination.
 
 If today's session inherited yesterday's alias in the same repository, that is
 a misdelivery. Handover is **explicit**, via `pager claim`. When there is an
-inbox available to take over, the hook mentions it once per session.
+inbox proven available to take over, the hook mentions it once per session.
+Hook age alone never makes an alias abandoned. Claims compare holder, lease
+generation, heartbeat and host identity again in the UPDATE, rejecting recorded
+changes during the runtime probe. This does not lock the external runtime.
 
 ## Relaying between stores
 
 Each machine keeps its own store, and everything above stays local to it. To
 reach a session on another machine, the two stores are paired as **peers** and
 something you run — a **transport** — carries mail between them. pager never
-opens a network connection; it only reads and writes lines.
+opens a connection to a remote peer; the transport reads and writes relay lines.
 
 ### Addresses
 

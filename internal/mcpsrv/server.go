@@ -97,12 +97,12 @@ func (s *Server) register() {
 	s.mcp.AddTool(
 		mcp.NewTool("msg_roster",
 			mcp.WithDescription(
-				"List the sessions you can page right now — the companion to msg_send, which needs a name to address. "+
-					"HOST says whether the recorded process is still running: live, gone, or unknown when there is nothing to ask about. "+
-					"LAST is only when a hook last ran for that session, so a session working through a long turn can look old and one "+
-					"that died minutes ago can look recent. PURPOSE is the last thing a person asked that session to do, which is how "+
-					"you tell apart two sessions in the same repository; it is empty for a session nobody has prompted, and a message "+
-					"pager itself sent to wake a session never becomes one. Address anyone here by the name in NAME."),
+				"List recent sessions and older sessions confirmed available by their runtime. "+
+					"HOST is only the recorded process: live, gone or unknown; Codex may share a daemon. "+
+					"LAST is hook age, not termination. THREAD is the observed Codex state; active/idle confirm loaded, "+
+					"while notLoaded, missing or failed queries do not prove termination. Old unknown sessions are counted; "+
+					"set all=true to include history. Exact aliases remain addressable. PURPOSE is the last thing a person asked that session to do; pager wake prompts never become its purpose. Address NAME."),
+			mcp.WithBoolean("all", mcp.Description("Include historical sessions; an old hook or unknown presence does not prove termination.")),
 		),
 		s.handleRoster,
 	)
@@ -210,8 +210,8 @@ func (s *Server) handleSend(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 // end.
 //
 // The rendering is deliver.FormatRoster, the same call `pager who` makes.
-func (s *Server) handleRoster(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	entries, err := deliver.Roster(ctx, s.st, store.DefaultStale)
+func (s *Server) handleRoster(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entries, err := deliver.Roster(ctx, s.st, store.DefaultStale, deliver.RosterOptions{All: req.GetBool("all", false)})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -219,7 +219,7 @@ func (s *Server) handleRoster(ctx context.Context, _ mcp.CallToolRequest) (*mcp.
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), sessionref.AliveAt, true) +
+	return mcp.NewToolResultText(deliver.FormatRoster(entries, s.st.Now(), true) +
 		deliver.FormatPeerFooter(peers, s.st.Now())), nil
 }
 

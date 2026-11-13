@@ -678,7 +678,7 @@ func orphanWorkspace(t *testing.T, st *store.Store) {
 	queue(t, st, "left-behind", "@a", "still waiting")
 	// Backdate the holder's heartbeat past the staleness threshold.
 	if _, err := st.DB().ExecContext(t.Context(),
-		"UPDATE sessions SET heartbeat_at = ? WHERE session_id = 'departed'",
+		"UPDATE sessions SET heartbeat_at = ?, host_client = 'claude', host_pid = 99999999, host_start = 1 WHERE session_id = 'departed'",
 		st.Now()-store.DefaultStale.Milliseconds()-1000); err != nil {
 		t.Fatalf("backdate heartbeat: %v", err)
 	}

@@ -3,12 +3,14 @@ package deliver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/iMUngHee/pager/internal/clock"
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/store"
 )
 
@@ -303,7 +305,7 @@ func TestClaimTransfersAutoName(t *testing.T) {
 	fake.Advance(stale + time.Hour)
 	addSession(t, st, "new", workspace, "")
 
-	ok, err := ClaimAlias(ctx, st, "bavu", "new", stale)
+	ok, err := ClaimAlias(ctx, st, "bavu", "new", stale, ClaimOptions{AllowUnknown: true})
 	if err != nil {
 		t.Fatalf("ClaimAlias: %v", err)
 	}
@@ -411,7 +413,7 @@ func TestClaimAliasTakesOverStaleHolder(t *testing.T) {
 	fake.Advance(stale + time.Hour)
 	addSession(t, st, "new", workspace, "")
 
-	ok, err := ClaimAlias(ctx, st, "inbox", "new", stale)
+	ok, err := ClaimAlias(ctx, st, "inbox", "new", stale, ClaimOptions{AllowUnknown: true})
 	if err != nil {
 		t.Fatalf("ClaimAlias: %v", err)
 	}
@@ -530,7 +532,7 @@ func TestConcurrentClaimAlias(t *testing.T) {
 	for i := range claimants {
 		wg.Go(func() {
 			<-start
-			won[i], errs[i] = ClaimAlias(context.Background(), st, "inbox", claimantID(i), stale)
+			won[i], errs[i] = ClaimAlias(context.Background(), st, "inbox", claimantID(i), stale, ClaimOptions{AllowUnknown: true})
 		})
 	}
 	close(start)
@@ -602,6 +604,7 @@ func TestOrphanAliases(t *testing.T) {
 
 	addSession(t, st, "gone", workspace, "")
 	addSession(t, st, "gone-quiet", workspace, "")
+	bindHost(t, st, "gone", 99999999, 1)
 	mustSetAlias(t, st, "has-mail", "gone")
 	mustSetAlias(t, st, "no-mail", "gone-quiet")
 	addPending(t, st, "has-mail")
@@ -640,5 +643,132 @@ func TestOrphanAliasesIsolatedByWorkspace(t *testing.T) {
 	}
 	if len(orphans) != 0 {
 		t.Errorf("orphans = %+v, want none from another workspace", orphans)
+	}
+}
+
+func TestClaimUsesEvidenceInsteadOfAge(t *testing.T) {
+	for _, tc := range []struct {
+		name, thread, host  string
+		allow, recent, want bool
+	}{
+		{name: "old unknown refuses"},
+		{name: "explicit old unknown", allow: true, want: true},
+		{name: "recent unknown refuses override", allow: true, recent: true},
+		{name: "old idle refuses override", thread: "idle", allow: true},
+		{name: "old active refuses override", thread: "active", allow: true},
+		{name: "unloaded is not proven gone", thread: "notLoaded"},
+		{name: "system error is not proven gone", thread: "systemError"},
+		{name: "shared gone is not proven gone", host: "gone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, fake := newStore(t)
+			if err := st.RecordSession(t.Context(), store.SessionRecord{ID: "old", Tool: "codex", Root: workspace}); err != nil {
+				t.Fatal(err)
+			}
+			mustSetAlias(t, st, "inbox", "old")
+			addPending(t, st, "inbox")
+			if !tc.recent {
+				fake.Advance(stale + time.Hour)
+			}
+			if err := st.RecordSession(t.Context(), store.SessionRecord{ID: "new", Tool: "codex", Root: workspace}); err != nil {
+				t.Fatal(err)
+			}
+			probe := func(context.Context, presence.Session) presence.Evidence {
+				return presence.Evidence{Thread: tc.thread, Host: tc.host}
+			}
+			orphans, err := OrphanAliases(t.Context(), st, workspace, "codex", stale, probe)
+			if err != nil || len(orphans) != 0 {
+				t.Fatalf("unknown/loaded holder suggested as orphan: %v %v", orphans, err)
+			}
+			ok, err := ClaimAlias(t.Context(), st, "inbox", "new", stale, ClaimOptions{Probe: probe, AllowUnknown: tc.allow})
+			if err != nil || ok != tc.want {
+				t.Fatalf("claim=%v err=%v want=%v", ok, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaimSnapshotRejectsChangesDuringProbe(t *testing.T) {
+	for _, mutation := range []string{
+		"UPDATE sessions SET heartbeat_at=heartbeat_at+1 WHERE session_id='old'",
+		"UPDATE sessions SET host_client='codex',host_pid=9123,host_start=456 WHERE session_id='old'",
+		"UPDATE aliases SET lease_generation=lease_generation+1 WHERE alias='inbox'",
+		"UPDATE aliases SET session_id='other' WHERE alias='inbox'",
+		"UPDATE sessions SET root='/other' WHERE session_id='old'",
+	} {
+		t.Run(mutation, func(t *testing.T) {
+			st, fake := newStore(t)
+			addSession(t, st, "old", workspace, "")
+			mustSetAlias(t, st, "inbox", "old")
+			fake.Advance(stale + time.Hour)
+			addSession(t, st, "new", workspace, "")
+			addSession(t, st, "other", workspace, "")
+			probe := func(context.Context, presence.Session) presence.Evidence {
+				if _, err := st.Exec(t.Context(), mutation); err != nil {
+					t.Fatal(err)
+				}
+				return presence.Evidence{Host: "gone"}
+			}
+			ok, err := ClaimAlias(t.Context(), st, "inbox", "new", stale, ClaimOptions{Probe: probe})
+			if err != nil || ok {
+				t.Fatalf("changed snapshot claimed: %v %v", ok, err)
+			}
+			if holder := aliasHolder(t, st, "inbox"); holder == "new" {
+				t.Fatal("claimant owns changed alias")
+			}
+		})
+	}
+}
+
+func TestClaimOverridePreservesClaimantConstraints(t *testing.T) {
+	for _, kind := range []string{"foreign-root", "foreign-tool", "stale-claimant", "missing-claimant"} {
+		t.Run(kind, func(t *testing.T) {
+			st, fake := newStore(t)
+			addSession(t, st, "old", workspace, "")
+			mustSetAlias(t, st, "inbox", "old")
+			if kind == "stale-claimant" {
+				addSession(t, st, "new", workspace, "")
+			}
+			fake.Advance(stale + time.Hour)
+			if kind != "missing-claimant" && kind != "stale-claimant" {
+				rec := store.SessionRecord{ID: "new", Root: workspace, Tool: tool}
+				if kind == "foreign-root" {
+					rec.Root = "/elsewhere"
+				}
+				if kind == "foreign-tool" {
+					rec.Tool = "codex"
+				}
+				if err := st.RecordSession(t.Context(), rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ok, err := ClaimAlias(t.Context(), st, "inbox", "new", stale, ClaimOptions{AllowUnknown: true, Probe: func(context.Context, presence.Session) presence.Evidence { return presence.Evidence{} }})
+			if err != nil || ok {
+				t.Fatalf("claim=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
+func TestClaimUnheldAndProvenGoneByDefault(t *testing.T) {
+	for _, unheld := range []bool{false, true} {
+		t.Run(fmt.Sprint(unheld), func(t *testing.T) {
+			st, _ := newStore(t)
+			addSession(t, st, "old", workspace, "")
+			mustSetAlias(t, st, "inbox", "old")
+			addSession(t, st, "new", workspace, "")
+			if unheld {
+				if _, err := st.Exec(t.Context(), "UPDATE aliases SET session_id=NULL WHERE alias='inbox'"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ok, err := ClaimAlias(t.Context(), st, "inbox", "new", stale, ClaimOptions{Probe: func(context.Context, presence.Session) presence.Evidence { return presence.Evidence{Host: "gone"} }})
+			if err != nil || !ok {
+				t.Fatalf("claim=%v err=%v", ok, err)
+			}
+			if holder := aliasHolder(t, st, "inbox"); holder != "new" {
+				t.Fatalf("holder=%s", holder)
+			}
+		})
 	}
 }

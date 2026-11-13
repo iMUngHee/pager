@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/store"
 )
 
@@ -39,9 +40,9 @@ const (
 	// not read that test as evidence this happens.
 	PresenceUnheld Presence = iota
 
-	// PresenceStranded means a session holds the alias and its host process is
-	// gone. This is the case the whole type exists for: the name resolves, the
-	// send succeeds, and nothing will read it.
+	// PresenceStranded means a session holds the alias and its dedicated host
+	// process is gone; a shared Codex daemon cannot establish this. The name
+	// resolves and the send succeeds, but nothing will read it.
 	PresenceStranded
 
 	// PresenceHeld means a session holds the alias and may still be there.
@@ -70,15 +71,16 @@ type HostProbe func(pid int, start int64) (alive, known bool)
 // A missing sessions row is treated as Unheld rather than as an error: the
 // column is a nullable reference, so a target naming a session that is not
 // there is the same absence as a target naming none.
-func PresenceOf(ctx context.Context, st *store.Store, t Target, probe HostProbe) (Presence, error) {
+func PresenceOf(ctx context.Context, st *store.Store, t Target, probe HostProbe, observations ...presence.Probe) (Presence, error) {
 	if t.SessionID == "" {
 		return PresenceUnheld, nil
 	}
 
-	var pid sql.NullInt64
-	var start sql.NullInt64
+	var session presence.Session
+	session.ID = t.SessionID
+	var pid, start sql.NullInt64
 	err := st.DB().QueryRowContext(ctx,
-		"SELECT host_pid, host_start FROM sessions WHERE session_id = ?", t.SessionID).Scan(&pid, &start)
+		"SELECT tool,heartbeat_at,host_pid,host_start FROM sessions WHERE session_id = ?", t.SessionID).Scan(&session.Tool, &session.Heartbeat, &pid, &start)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PresenceUnheld, nil
 	}
@@ -86,10 +88,18 @@ func PresenceOf(ctx context.Context, st *store.Store, t Target, probe HostProbe)
 		return PresenceHeld, fmt.Errorf("read host of %s: %w", t.SessionID, err)
 	}
 
-	// A null pid is detection having failed at attach time, which the probe
-	// reports as unknowable anyway once it is handed a zero.
-	alive, known := probe(int(pid.Int64), start.Int64)
-	if known && !alive {
+	session.HostPID = int(pid.Int64)
+	session.HostStart = start.Int64
+	observe := presence.NewProbe()
+	if len(observations) > 0 && observations[0] != nil {
+		observe = observations[0]
+	}
+	evidence := observe(ctx, session)
+	if probe != nil {
+		alive, known := probe(session.HostPID, session.HostStart)
+		evidence.Host = HostState(alive, known)
+	}
+	if presence.Classify(session, evidence, st.Now(), store.DefaultStale).Gone {
 		return PresenceStranded, nil
 	}
 	return PresenceHeld, nil

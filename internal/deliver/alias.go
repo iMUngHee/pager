@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/store"
 )
 
@@ -57,9 +58,9 @@ func (e *AmbiguousError) Error() string {
 // they match a pattern, so several hits mean the person has to say which name
 // they meant.
 //
-// livesOnly marks the tier that binds the staleness cutoff as ?2 and so sees
-// only the names a live session answers to. It exists because names are never
-// reclaimed: a name outlives the session that held it, and every session that
+// livesOnly marks the tier filtered through the same presence policy as the
+// default roster. Names are never reclaimed: a name outlives the session that
+// held it, and every session that
 // ever ran leaves one behind. Without this tier the set a person picks from —
 // what `pager who` lists — keeps shrinking away from the set a reference is
 // resolved against, and abbreviations that were unique when they were learned
@@ -85,9 +86,7 @@ var targetTiers = []struct {
 	{"live substring", `SELECT a.alias, COALESCE(a.session_id, '')
 	                      FROM aliases a
 	                     WHERE instr(a.alias, ?1) > 0
-	                       AND EXISTS (SELECT 1 FROM sessions s
-	                                    WHERE s.session_id = a.session_id
-	                                      AND s.heartbeat_at >= ?2)`, false, true},
+	                       AND EXISTS (SELECT 1 FROM sessions s WHERE s.session_id = a.session_id)`, false, true},
 	{"substring", `SELECT alias, COALESCE(session_id, '') FROM aliases WHERE instr(alias, ?1) > 0`, false, false},
 }
 
@@ -101,25 +100,42 @@ var targetTiers = []struct {
 // choosing between, and widening the search would only add names to the list
 // that nobody is waiting behind.
 //
-// staleAfter is how long a session may go without a hook event before its names
-// stop competing for a short reference. It is passed in rather than read from a
-// package constant so that this matches ClaimAlias, OrphanAliases and Roster,
-// which all take the same threshold from their caller.
-func ResolveTarget(ctx context.Context, st *store.Store, ref string, staleAfter time.Duration) (Target, error) {
+// staleAfter controls recent unknown sessions; positive runtime evidence can
+// keep an older session competing for a short reference. It is passed in rather
+// than read from a package constant so that this matches ClaimAlias,
+// OrphanAliases and Roster, which take the same threshold from their caller.
+func ResolveTarget(ctx context.Context, st *store.Store, ref string, staleAfter time.Duration, probes ...presence.Probe) (Target, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return Target{}, errors.New("empty target reference")
 	}
-	cutoff := st.Now() - staleAfter.Milliseconds()
+	var probe presence.Probe
+	if len(probes) > 0 {
+		probe = probes[0]
+	}
 
 	for _, tier := range targetTiers {
 		args := []any{ref}
-		if tier.livesOnly {
-			args = append(args, cutoff)
-		}
 		found, err := matchTargets(ctx, st, tier.query, args...)
 		if err != nil {
 			return Target{}, fmt.Errorf("resolve target by %s: %w", tier.name, err)
+		}
+		if tier.livesOnly && len(found) > 0 {
+			view, err := Roster(ctx, st, staleAfter, RosterOptions{Probe: probe})
+			if err != nil {
+				return Target{}, err
+			}
+			visible := make(map[string]bool, len(view.Entries))
+			for _, e := range view.Entries {
+				visible[e.SessionID] = true
+			}
+			eligible := found[:0]
+			for _, t := range found {
+				if visible[t.SessionID] {
+					eligible = append(eligible, t)
+				}
+			}
+			found = eligible
 		}
 		switch {
 		case len(found) == 0:
@@ -187,9 +203,7 @@ func primaryTarget(ctx context.Context, st *store.Store, ref, session string) (T
 	return Target{Alias: alias, SessionID: session}, nil
 }
 
-// matchTargets runs one tier's query. The bindings are variadic because only
-// the live tier needs a second one; passing a cutoff the other queries never
-// mention would hand SQLite more parameters than the statement declares.
+// matchTargets runs one address tier's query.
 func matchTargets(ctx context.Context, st *store.Store, query string, args ...any) ([]Target, error) {
 	rows, err := st.DB().QueryContext(ctx, query, args...)
 	if err != nil {
@@ -210,9 +224,9 @@ func matchTargets(ctx context.Context, st *store.Store, query string, args ...an
 
 // SetAlias points alias at session, creating it in that session's workspace.
 //
-// It refuses to move an alias another session holds; that is ClaimAlias's job,
-// and only ClaimAlias carries the staleness conditions that make a takeover
-// safe. Re-running it for the alias's own session is a no-op that succeeds.
+// It refuses to move an alias another session holds; ClaimAlias checks runtime
+// evidence and a recorded snapshot before a takeover. Re-running it for the
+// alias's own session is a no-op that succeeds.
 //
 // Reports false when the alias belongs to someone else or when session does not
 // exist — in both cases nothing was written.
@@ -259,44 +273,59 @@ func SetAlias(ctx context.Context, st *store.Store, alias, session string) (bool
 	return n > 0, nil
 }
 
-// ClaimAlias transfers an alias to newSession, reporting whether it succeeded.
-//
-// There is no automatic handover. Matching root, tool and staleness was once
-// enough to inherit an inbox, which meant a session that happened to open the
-// same repository today would silently receive mail addressed to yesterday's
-// work. Taking over is now something a person asks for.
-//
-// Every precondition is a condition of this one UPDATE rather than a check
-// before it: the alias must be in the claiming session's workspace, that
-// session must itself be live, and the current holder must be absent or stale.
-// Any of these evaluated separately would leave a window where the holder sends
-// a heartbeat between the check and the write, and the claim would succeed
-// against a session that is very much alive.
-// The timestamp follows the same rule as SetAlias: a name taken over must
-// outrank the names the claiming session already holds, so that it becomes the
-// one that session is known by. Here the maximum is taken over ?1, the new
-// holder, rather than over aliases.session_id — during this UPDATE that column
-// still names the incumbent being displaced.
-func ClaimAlias(ctx context.Context, st *store.Store, alias, newSession string, staleAfter time.Duration) (bool, error) {
-	cutoff := st.Now() - staleAfter.Milliseconds()
+// ClaimOptions permits a deliberate takeover of a stale unknown holder. A
+// positive runtime observation or a recent hook cannot be overridden.
+type ClaimOptions struct {
+	Probe        presence.Probe
+	AllowUnknown bool
+}
+
+// ClaimAlias probes the incumbent, then compares its recorded snapshot in the
+// UPDATE. Runtime observations are not atomic with SQLite, but a hook refresh,
+// host rebind or lease transfer recorded during the probe refuses the claim.
+func ClaimAlias(ctx context.Context, st *store.Store, alias, newSession string, staleAfter time.Duration, options ...ClaimOptions) (bool, error) {
+	var opts ClaimOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if opts.Probe == nil {
+		opts.Probe = presence.NewProbe()
+	}
+	var holder, id, tool, root, hostClient sql.NullString
+	var heartbeat, pid, start sql.NullInt64
+	var generation int64
+	err := st.DB().QueryRowContext(ctx, `
+  SELECT a.session_id,a.lease_generation,s.session_id,s.tool,s.root,
+         s.heartbeat_at,s.host_client,s.host_pid,s.host_start
+    FROM aliases a LEFT JOIN sessions s ON s.session_id=a.session_id WHERE a.alias=?`, strings.TrimSpace(alias)).Scan(
+		&holder, &generation, &id, &tool, &root, &heartbeat, &hostClient, &pid, &start)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read claim holder: %w", err)
+	}
+	if id.Valid {
+		session := presence.Session{ID: id.String, Tool: tool.String, Heartbeat: heartbeat.Int64, HostPID: int(pid.Int64), HostStart: start.Int64}
+		state := presence.Classify(session, opts.Probe(ctx, session), st.Now(), staleAfter)
+		if !state.Gone && !(opts.AllowUnknown && !state.Recent && !state.Available) {
+			return false, nil
+		}
+	}
 	res, err := st.Exec(ctx, `
-		UPDATE aliases
-		   SET session_id = ?1,
-		       lease_generation = lease_generation + 1,
-		       updated_at = max(?2, COALESCE((SELECT max(a.updated_at) FROM aliases a
-		                                       WHERE a.session_id = ?1), 0) + 1)
-		 WHERE alias = ?3
-		   -- the claiming session must be live and in this alias's workspace
-		   AND EXISTS (SELECT 1 FROM sessions n
-		                WHERE n.session_id = ?1
-		                  AND n.root = aliases.root AND n.tool = aliases.tool
-		                  AND n.heartbeat_at >= ?4)
-		   -- the incumbent must be absent or stale
-		   AND (session_id IS NULL
-		        OR NOT EXISTS (SELECT 1 FROM sessions o
-		                        WHERE o.session_id = aliases.session_id
-		                          AND o.heartbeat_at >= ?4))`,
-		newSession, st.Now(), strings.TrimSpace(alias), cutoff)
+  UPDATE aliases
+     SET session_id=?1,lease_generation=lease_generation+1,
+         updated_at=max(?2,COALESCE((SELECT max(a.updated_at) FROM aliases a WHERE a.session_id=?1),0)+1)
+   WHERE alias=?3 AND session_id IS ?4 AND lease_generation=?5
+     AND EXISTS (SELECT 1 FROM sessions n WHERE n.session_id=?1
+                 AND n.root=aliases.root AND n.tool=aliases.tool AND n.heartbeat_at>=?6)
+     AND ((?7 IS NULL AND NOT EXISTS (SELECT 1 FROM sessions o WHERE o.session_id=aliases.session_id))
+          OR EXISTS (SELECT 1 FROM sessions o WHERE o.session_id=?7 AND o.session_id=aliases.session_id
+                      AND o.heartbeat_at IS ?8 AND o.host_client IS ?9
+                      AND o.host_pid IS ?10 AND o.host_start IS ?11
+                      AND o.tool IS ?12 AND o.root IS ?13))`,
+		newSession, st.Now(), strings.TrimSpace(alias), holder, generation, st.Now()-staleAfter.Milliseconds(),
+		id, heartbeat, hostClient, pid, start, tool, root)
 	if err != nil {
 		return false, fmt.Errorf("claim alias: %w", err)
 	}
@@ -345,33 +374,46 @@ func SessionWorkspace(ctx context.Context, st *store.Store, session string) (roo
 // Undelivered mail is part of the definition on purpose. An alias whose session
 // simply ended, with nothing waiting, is not a problem to solve and suggesting
 // a takeover for it would be noise.
-func OrphanAliases(ctx context.Context, st *store.Store, root, tool string, staleAfter time.Duration) ([]Orphan, error) {
+func OrphanAliases(ctx context.Context, st *store.Store, root, tool string, staleAfter time.Duration, probes ...presence.Probe) ([]Orphan, error) {
+	probe := presence.NewProbe()
+	if len(probes) > 0 && probes[0] != nil {
+		probe = probes[0]
+	}
 	rows, err := st.DB().QueryContext(ctx, `
-		SELECT a.alias, count(m.id)
-		  FROM aliases a
-		  JOIN messages m ON m.alias = a.alias AND m.delivered_at IS NULL AND m.dst_peer IS NULL
-		 WHERE a.root = ? AND a.tool = ?
-		   AND (a.session_id IS NULL
-		        OR NOT EXISTS (SELECT 1 FROM sessions o
-		                        WHERE o.session_id = a.session_id
-		                          AND o.heartbeat_at >= ?))
-		 GROUP BY a.alias
-		 ORDER BY a.alias`,
-		root, tool, st.Now()-staleAfter.Milliseconds())
+  SELECT a.alias,count(m.id),COALESCE(s.session_id,''),COALESCE(s.tool,''),
+         COALESCE(s.heartbeat_at,0),COALESCE(s.host_pid,0),COALESCE(s.host_start,0)
+    FROM aliases a
+    JOIN messages m ON m.alias=a.alias AND m.delivered_at IS NULL AND m.dst_peer IS NULL
+    LEFT JOIN sessions s ON s.session_id=a.session_id
+   WHERE a.root=? AND a.tool=? GROUP BY a.alias ORDER BY a.alias`, root, tool)
 	if err != nil {
 		return nil, fmt.Errorf("list orphan aliases: %w", err)
 	}
-	defer rows.Close()
-
-	var orphans []Orphan
-	for rows.Next() {
-		var o Orphan
-		if err := rows.Scan(&o.Alias, &o.Pending); err != nil {
-			return nil, fmt.Errorf("list orphan aliases: %w", err)
-		}
-		orphans = append(orphans, o)
+	type candidate struct {
+		orphan  Orphan
+		session presence.Session
 	}
-	return orphans, rows.Err()
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.orphan.Alias, &c.orphan.Pending, &c.session.ID, &c.session.Tool, &c.session.Heartbeat, &c.session.HostPID, &c.session.HostStart); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, c)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var orphans []Orphan
+	for _, c := range candidates {
+		if c.session.ID == "" || presence.Classify(c.session, probe(ctx, c.session), st.Now(), staleAfter).Gone {
+			orphans = append(orphans, c.orphan)
+		}
+	}
+	return orphans, nil
 }
 
 // TakeClaimHint reserves the single orphan hint a session is allowed to show,

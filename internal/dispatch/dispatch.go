@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/iMUngHee/pager/internal/deliver"
+	"github.com/iMUngHee/pager/internal/presence"
 	"github.com/iMUngHee/pager/internal/sessionref"
 	"github.com/iMUngHee/pager/internal/store"
 	"github.com/iMUngHee/pager/internal/wake"
@@ -28,7 +29,8 @@ type Request struct {
 
 	// Probe answers whether a recorded host is still running. nil means
 	// sessionref.AliveAt; tests hand in one that answers without a process.
-	Probe deliver.HostProbe
+	Probe   deliver.HostProbe
+	Observe presence.Probe
 
 	// Wake pokes the recipient. nil means wake.Wake; tests hand in one that
 	// answers without a host surface.
@@ -89,11 +91,15 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 		}}, nil
 	}
 
+	observe := req.Observe
+	if observe == nil {
+		observe = presence.NewProbe()
+	}
 	var found deliver.Target
 	if addr.Exact {
 		found, err = deliver.ResolveExact(ctx, st, addr.Ref)
 	} else {
-		found, err = deliver.ResolveTarget(ctx, st, addr.Ref, store.DefaultStale)
+		found, err = deliver.ResolveTarget(ctx, st, addr.Ref, store.DefaultStale, observe)
 	}
 	if err != nil {
 		return Result{}, err
@@ -130,7 +136,7 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	if probe == nil {
 		probe = sessionref.AliveAt
 	}
-	presence, err := deliver.PresenceOf(ctx, st, found, probe)
+	presence, err := deliver.PresenceOf(ctx, st, found, probe, observe)
 	if err != nil {
 		return res, err
 	}
@@ -153,14 +159,9 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	}
 	woke := poke(ctx, found.SessionID, wake.PokeBody(found.Alias, label, tool))
 
-	// A gone host does not always mean a gone session. A restarted Codex runs
-	// its sessions under a new app-server process, and the record follows only
-	// at the session's first hook, which waits for its next turn — so until
-	// then the holder reads as stranded while its thread still takes a queued
-	// poke. A poke that landed is the stronger evidence. A refusal is evidence
-	// too — wake reports one only after a live endpoint answered — so it is not
-	// called absence, but nor does it promise a next activity: the recorded
-	// host is gone. Anything else keeps the stranded note.
+	// A delivered poke or a live endpoint's refusal is stronger evidence than
+	// the recorded host observation. Keep that diagnosis without promising a
+	// next activity; only an unresponsive endpoint retains the stranded note.
 	if presence == deliver.PresenceStranded {
 		switch woke.Outcome {
 		case wake.Woken, wake.Coalesced:

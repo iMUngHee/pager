@@ -471,7 +471,7 @@ func TestReclaimAfterAliasHandover(t *testing.T) {
 	// The holder goes away; the lease and the session both lapse.
 	fake.Advance(stale + time.Hour)
 	addSession(t, st, "new", workspace, "")
-	if ok, err := ClaimAlias(ctx, st, "shared", "new", stale); err != nil || !ok {
+	if ok, err := ClaimAlias(ctx, st, "shared", "new", stale, ClaimOptions{AllowUnknown: true}); err != nil || !ok {
 		t.Fatalf("ClaimAlias: ok=%v err=%v", ok, err)
 	}
 
