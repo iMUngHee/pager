@@ -79,17 +79,17 @@ func TestResolveTierOrder(t *testing.T) {
 			wantID: "from-env", wantSource: SourceEnv,
 		},
 		{
-			name:     "tier 3 host detection when neither flag nor env",
+			name:     "host detection when neither flag nor env",
 			detected: true, lookup: lookupReturning("from-host"),
 			wantID: "from-host", wantSource: SourceHost,
 		},
 		{
-			name:     "tier 4 unattributed when detection fails",
+			name:     "unattributed when detection fails",
 			detected: false, lookup: lookupReturning("from-host"),
 			wantID: "", wantSource: SourceUnattributed,
 		},
 		{
-			name:     "tier 4 unattributed when host holds no session",
+			name:     "unattributed when host holds no session",
 			detected: true, lookup: lookupReturning(""),
 			wantID: "", wantSource: SourceUnattributed,
 		},

@@ -244,3 +244,16 @@ func TestDescribeDoesNotClaimThePeerActed(t *testing.T) {
 			"observed — a frame written — and not what the peer did with it.", got, want)
 	}
 }
+
+func TestGeneratedPokeAlwaysRecognized(t *testing.T) {
+	for _, value := range []string{"ordinary", "a\nb", "a\rb", "a\tb", "a\u2028b", "a\u2029b", "a\x00b", strings.Repeat("x", 100)} {
+		for field := 0; field < 3; field++ {
+			fields := []string{"inbox", "sender", "codex"}
+			fields[field] = value
+			body := PokeBody(fields[0], fields[1], fields[2])
+			if !deliver.IsPokePrompt(body) {
+				t.Errorf("unrecognized generated poke: %q", body)
+			}
+		}
+	}
+}

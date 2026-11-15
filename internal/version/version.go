@@ -7,7 +7,7 @@ import "runtime/debug"
 // the MCP server and the Codex app-server client report. Every bump comes with
 // a `## <version>` entry at the top of CHANGELOG.md, in the same commit;
 // TestChangelogHasCurrentVersion fails without it.
-const Version = "0.7.2"
+const Version = "0.8.0"
 
 // String is Version followed by the build it came from, when the toolchain
 // recorded one: the commit of a checkout build, or the module version that

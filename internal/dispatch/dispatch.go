@@ -21,11 +21,12 @@ import (
 // Request is one send as the sender expressed it.
 type Request struct {
 	deliver.Metadata
-	Target string // alias, session id, pm ref, fragment, or name@peer
-	Body   string
-	Sender string // resolved sending session; "" when unattributed
-	Label  string // how the recipient sees the sender; "" for the default
-	Human  bool   // operator assertion; never set by the MCP server
+	Target     string // alias, session id, pm ref, fragment, or name@peer
+	Body       string
+	Sender     string // resolved sending session; "" when unattributed
+	Label      string // how the recipient sees the sender; "" for the default
+	Human      bool   // operator assertion; never set by the MCP server
+	Automation string // local send-only producer
 
 	// Probe answers whether a recorded host is still running. nil means
 	// sessionref.AliveAt; tests hand in one that answers without a process.
@@ -78,7 +79,7 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 		address := addr.Ref + "@" + addr.Peer
 		sent, err := deliver.Send(ctx, st, deliver.SendRequest{
 			Metadata: req.Metadata,
-			Alias:    address, Peer: addr.Peer, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
+			Alias:    address, Peer: addr.Peer, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human, Automation: req.Automation,
 		})
 		if err != nil {
 			return Result{}, err
@@ -111,7 +112,7 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 
 	sent, err := deliver.Send(ctx, st, deliver.SendRequest{
 		Metadata: req.Metadata,
-		Alias:    found.Alias, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human,
+		Alias:    found.Alias, Body: req.Body, Sender: req.Sender, Label: label, Human: req.Human, Automation: req.Automation,
 	})
 	if err != nil {
 		return Result{}, err
@@ -180,8 +181,12 @@ func Send(ctx context.Context, st *store.Store, req Request) (Result, error) {
 	return res, nil
 }
 
-// senderLabel is req.Label, or the sender's default label when none was given.
+// senderLabel fixes automation provenance and otherwise uses the requested
+// label or the session's default.
 func senderLabel(ctx context.Context, st *store.Store, req Request) (string, error) {
+	if req.Automation != "" {
+		return "automation:" + req.Automation, nil
+	}
 	if req.Label != "" {
 		return req.Label, nil
 	}

@@ -42,6 +42,10 @@ CREATE TABLE loop_guard (
   PRIMARY KEY(a, b, task)
 );
 CREATE INDEX loop_guard_updated ON loop_guard(updated_at);`, // 4 -> 5
+	`ALTER TABLE messages ADD COLUMN automation TEXT NOT NULL DEFAULT '';
+DROP INDEX messages_event;
+CREATE UNIQUE INDEX messages_event ON messages(automation, COALESCE(sender_session, ''), alias, task, event_id)
+  WHERE event_id IS NOT NULL AND src_peer IS NULL;`, // 5 -> 6
 }
 
 // schemaVersion is the user_version this binary expects. len of an array is a

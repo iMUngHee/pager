@@ -47,7 +47,8 @@ only the hint is suppressed.
 
 **How a causality reset is decided** — all three conditions must hold. The
 event is `UserPromptSubmit`, the payload's `prompt` is not blank, and that
-`prompt` does not contain `deliver.PokeSentinel`. A host that resumes itself
+`prompt` is not a complete generated notification (`deliver.IsPokePrompt`).
+Quoted markers and notifications with appended user instructions remain user input. A host that resumes itself
 after a Stop injection has no prompt body of its own, so it does not reset, and
 sends going out then still count as `caused`.
 
@@ -224,3 +225,6 @@ holding up a session is exactly the situation fail-open exists to prevent.
 The registration commands are in [../README.md](../README.md#install), and
 which events to register is in
 [reference.md](reference.md#which-hook-events-to-register).
+
+Custom database archives use the path rules in reference.md; only a database
+named msg.db keeps the sibling archive.jsonl path.

@@ -494,3 +494,75 @@ func TestUncausedSendsDoNotNeedWindowExpiry(t *testing.T) {
 		t.Errorf("send after the window: %v", err)
 	}
 }
+
+func TestAutomationIdentityEventsAndCausalReply(t *testing.T) {
+	st, _ := newStore(t)
+	twoSessions(t, st)
+	req := SendRequest{Alias: "inboxB", Body: "stalled", Automation: "gaebu", Metadata: Metadata{Task: "team", Kind: "failure", EventID: "r1"}}
+	first := mustSend(t, st, req)
+	if first.Hop != 0 || first.Origin != "automation" {
+		t.Fatalf("automation attribution: %+v", first)
+	}
+	retry := mustSend(t, st, req)
+	if !retry.Existing || retry.ID != first.ID || retry.Origin != "automation" {
+		t.Fatalf("retry: %+v", retry)
+	}
+	human := req
+	human.Automation = ""
+	human.Human = true
+	h := mustSend(t, st, human)
+	other := req
+	other.Automation = "other"
+	o := mustSend(t, st, other)
+	if h.ID == first.ID || o.ID == first.ID || o.ID == h.ID {
+		t.Fatal("event identities collided")
+	}
+	changed := req
+	changed.Body = "different"
+	if _, err := Send(t.Context(), st, changed); err == nil {
+		t.Fatal("conflicting payload accepted")
+	}
+	for _, bad := range []SendRequest{
+		{Alias: "inboxB", Automation: "gaebu", Sender: "A"},
+		{Alias: "inboxB", Automation: "gaebu", Human: true},
+		{Alias: "inbox@peer", Peer: "peer", Automation: "gaebu"},
+		{Alias: "inboxB", Automation: "Bad"},
+		{Alias: "inboxB", Automation: strings.Repeat("a", 49)},
+		{Alias: "inboxB", Automation: "한글"},
+	} {
+		if _, err := Send(t.Context(), st, bad); err == nil {
+			t.Errorf("accepted invalid automation %+v", bad)
+		}
+	}
+	deliverAndConfirm(t, st, "B", "automation", first.ID)
+	reply := mustSend(t, st, SendRequest{Alias: "inboxA", Sender: "B", Body: "working on it"})
+	if reply.Hop != 1 || reply.Origin != OriginCaused {
+		t.Fatalf("reply lost cause: %+v", reply)
+	}
+	var cause int64
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT cause_id FROM messages WHERE id=?", reply.ID).Scan(&cause); err != nil {
+		t.Fatal(err)
+	}
+	if cause != first.ID {
+		t.Fatalf("reply cause=%d, want %d", cause, first.ID)
+	}
+}
+
+func TestAutomationNameBoundaries(t *testing.T) {
+	for _, name := range []string{"a", "z", "0", "9", "._-", strings.Repeat("a", 48)} {
+		t.Run(name, func(t *testing.T) {
+			st, _ := newStore(t)
+			if _, err := Send(t.Context(), st, SendRequest{Alias: "inbox", Automation: name, Body: "timer"}); err != nil {
+				t.Fatalf("valid producer %q refused: %v", name, err)
+			}
+		})
+	}
+	for _, name := range []string{"`", "{", "/", ":", "a b", "a\nb", strings.Repeat("a", 49)} {
+		t.Run(name, func(t *testing.T) {
+			st, _ := newStore(t)
+			if _, err := Send(t.Context(), st, SendRequest{Alias: "inbox", Automation: name, Body: "timer"}); err == nil {
+				t.Fatalf("invalid producer %q accepted", name)
+			}
+		})
+	}
+}

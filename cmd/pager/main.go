@@ -38,7 +38,7 @@ type command struct {
 }
 
 var commands = []command{
-	{"send", "<target> <body> [--human] [--session <id>] [--label <name>]", "Leave a message for another session", send},
+	{"send", "<target> <body> [--human | --automation <name>] [--session <id>] [--label <name>]", "Leave a message for another session", send},
 	{"attach", "[--session <id>] [--tool <tool>] [--root <dir>] [--pm-ref <ref>]", "Register this session as a delivery target", attach},
 	{"alias", "<name> [--session <id>]", "Point a short name at a session", alias},
 	{"claim", "<name> [--session <id>] [--allow-unknown]", "Take over an unheld or proven-gone inbox", claim},
@@ -92,6 +92,7 @@ func send(args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	session := fs.String("session", "", "sending session id")
 	human := fs.Bool("human", false, "assert this send is operator-initiated, not agent-initiated")
+	automation := fs.String("automation", "", "local send-only automation name; no session registration")
 	label := fs.String("label", "", "how the recipient sees the sender")
 	task := fs.String("task", "", "optional cooperative task scope")
 	kind := fs.String("kind", "update", "update, result, failure, or release; important events bypass wake pauses")
@@ -113,20 +114,34 @@ func send(args []string) error {
 	}
 	defer st.Close()
 
-	ref, err := resolver(st).Resolve(ctx, *session)
-	if err != nil {
-		return err
-	}
-	// --human is an operator assertion, so it is the one way to send without a
-	// resolvable session. Everything else is refused rather than recorded
-	// anonymously.
-	if !ref.Attributed() && !*human {
-		return deliver.ErrUnattributed
+	var automationFlag, conflictingFlag bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "automation" {
+			automationFlag = true
+		}
+		if f.Name == "session" || f.Name == "human" || f.Name == "label" {
+			conflictingFlag = true
+		}
+	})
+	var sender string
+	if automationFlag {
+		if *automation == "" || conflictingFlag {
+			return errors.New("--automation needs a name and cannot be combined with --session, --human or --label")
+		}
+	} else {
+		ref, err := resolver(st).Resolve(ctx, *session)
+		if err != nil {
+			return err
+		}
+		if !ref.Attributed() && !*human {
+			return deliver.ErrUnattributed
+		}
+		sender = ref.SessionID
 	}
 
 	res, err := dispatch.Send(ctx, st, dispatch.Request{
 		Metadata: deliver.Metadata{Task: *task, Kind: *kind, Activity: *activity, Progress: *progress, EventID: *event},
-		Target:   target, Body: body, Sender: ref.SessionID, Label: *label, Human: *human,
+		Target:   target, Body: body, Sender: sender, Label: *label, Human: *human, Automation: *automation,
 	})
 	if res.Sent.ID != 0 { // stored, even if reporting on it failed
 		fmt.Println(res.Head())
@@ -616,5 +631,5 @@ func usage(w *os.File) {
 	}
 	tw.Flush()
 	fmt.Fprint(w, "\nSession binding: see docs/session-binding.md.\n"+
-		"A send with no resolvable session is rejected unless --human is given.\n")
+		"A send with no resolvable session is rejected unless --human or --automation is given.\n")
 }

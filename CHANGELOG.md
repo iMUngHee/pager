@@ -18,6 +18,48 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.8.0 — 2026-11-16
+
+### Added
+
+- Local timer sends with `pager send <target> <body> --automation <name>`.
+  No sender registration or session is required. The fixed display label is
+  `automation:<name>` and exports preserve the automation identity. Event IDs
+  are scoped to the producer, recipient alias and task; retrying a read event
+  does not wake again. Use a new event for a scheduled reminder round.
+
+### Fixed
+
+- Databases sharing a directory have separate archives. `msg.db` keeps
+  `archive.jsonl`; other database paths use `<database path>.archive.jsonl`.
+- Database paths containing literal `#`, `?` or `%` preserve their filenames
+  instead of becoming SQLite URI fragments or query options.
+- Wake notifications escape control characters in displayed names. Generated
+  notifications remain recognizable even when a sender label contains a newline.
+- User prompts quoting `[pager-poke]` or appending instructions to a notification
+  update purpose and causal state. Only complete generated notifications are
+  excluded, using the same predicate as consumed-wake suppression.
+- Session-resolution documentation and test labels agree with the five CLI
+  sources. Four Codex queue error strings pass staticcheck ST1005.
+
+### Upgrading
+
+Schema 6 adds automation identity and extends the event uniqueness index. Older
+binaries refuse this database after migration; upgrade all writers and restart
+running MCP servers before using the upgraded store. Relay protocol remains 2;
+automation sends to remote peers are explicitly refused. Ordinary peer sends
+retain their protocol behavior. No automation registration or cleanup is needed.
+
+Custom databases previously shared their directory's `archive.jsonl`. Keep that
+historical file: it cannot reliably be split by source database. Full custom-DB
+history may span that legacy file, the new archive and `pager export`; legacy
+records may include other databases. Use one consistent DB path spelling.
+
+If a configured path contained literal URI punctuation, an older binary may
+have opened a truncated or decoded filename instead. Preserve that old file
+and inspect its contents before moving it to the intended path; the upgrade
+does not guess or automatically move such databases.
+
 ## 0.7.2 — 2026-11-09
 
 ### Fixed

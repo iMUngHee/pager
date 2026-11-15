@@ -245,3 +245,58 @@ func TestSendReportsTheMessageWhenSenderToolFails(t *testing.T) {
 		t.Errorf("result after a late failure = %+v; want the stored message", res)
 	}
 }
+
+func TestAutomationReminderWakesButReadRetryDoesNot(t *testing.T) {
+	st := newStore(t)
+	named(t, st, "recipient", "inbox", "")
+	wakes := 0
+	req := Request{Target: "inbox", Body: "stalled", Automation: "gaebu", Metadata: deliver.Metadata{Kind: "failure", EventID: "finding-r1"}, Wake: func(_ context.Context, session, body string) wake.Result {
+		wakes++
+		if session != "recipient" || !deliver.IsPokePrompt(body) || !strings.Contains(body, "automation:gaebu") {
+			t.Errorf("bad wake %q: %q", session, body)
+		}
+		return wake.Result{Outcome: wake.Woken}
+	}}
+	first, err := Send(t.Context(), st, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliver.MarkListed(t.Context(), st, []int64{first.Sent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := Send(t.Context(), st, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wakes != 1 || retry.Sent.ID != first.Sent.ID || !retry.Sent.AlreadyRead {
+		t.Fatalf("read retry woke or duplicated: wakes=%d %+v", wakes, retry)
+	}
+	req.EventID = "finding-r2"
+	reminder, err := Send(t.Context(), st, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wakes != 2 || reminder.Sent.ID == first.Sent.ID {
+		t.Fatalf("reminder did not wake independently: wakes=%d %+v", wakes, reminder)
+	}
+}
+
+func TestRemoteAutomationRefusesBeforeAllocation(t *testing.T) {
+	st := newStore(t)
+	if _, err := deliver.AddPeer(t.Context(), st, "vm", otherStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Send(t.Context(), st, Request{Target: "inbox@vm", Body: "stalled", Automation: "gaebu"}); err == nil {
+		t.Fatal("remote automation accepted")
+	}
+	var seq, count int
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT out_seq FROM peers WHERE name='vm'").Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT count(*) FROM messages").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if seq != 0 || count != 0 {
+		t.Fatalf("refused automation allocated state: seq=%d messages=%d", seq, count)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"modernc.org/sqlite"
@@ -122,16 +123,15 @@ func (s *Store) DB() *sql.DB { return s.db }
 //
 // journal_mode is deliberately absent — see applyWAL.
 //
-// Encoding is url.Values' job, since a database path may contain characters
-// that would otherwise terminate the query string. TestConnectionPragmas
-// asserts the settings actually take effect, so an encoding mismatch fails
-// loudly rather than silently dropping foreign_keys.
+// Query values and opaque file paths have separate escaping rules. Literal
+// URI delimiters in a filename must not become options or fragments in SQLite.
 func dsn(path string) string {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "foreign_keys(ON)")
-	u := url.URL{Scheme: "file", Opaque: path, RawQuery: q.Encode()}
+	escaped := strings.NewReplacer("%", "%25", "?", "%3F", "#", "%23").Replace(path)
+	u := url.URL{Scheme: "file", Opaque: escaped, RawQuery: q.Encode()}
 	return u.String()
 }
 

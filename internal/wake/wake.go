@@ -193,14 +193,14 @@ func classify(err error) Outcome {
 // says "another Claude session sent a message" whatever the sender runs under —
 // so without it a Codex sender reads as Claude.
 func PokeBody(alias, label, tool string) string {
-	from := label
+	from := deliver.SanitizeLabel(label)
 	if from == "" {
 		from = "another session"
 	}
 	if tool != "" {
-		from += " (" + tool + " session)"
+		from += " (" + deliver.SanitizeLabel(tool) + " session)"
 	}
-	return "pager: new mail for " + alias + " from " + from + ". " + deliver.PokeSentinel +
+	return "pager: new mail for " + deliver.SanitizeLabel(alias) + " from " + from + ". " + deliver.PokeSentinel +
 		deliver.PokeRecoveryHint
 }
 

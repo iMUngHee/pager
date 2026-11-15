@@ -42,7 +42,8 @@ Claude Code와 Codex CLI 모두 stdin으로 JSON을 받고, stdout에
 힌트뿐이다.
 
 **인과 리셋의 판정** — 세 조건을 모두 만족할 때만 리셋한다. 이벤트가 `UserPromptSubmit`이고,
-페이로드의 `prompt`가 공백이 아니고, 그 `prompt`에 `deliver.PokeSentinel`이 없을 때다. 호스트가
+페이로드의 `prompt`가 공백이 아니고, 그 `prompt`가 완전한 자동 알림 형식(`deliver.IsPokePrompt`)이 아닐 때다.
+마커를 인용하거나 알림 뒤에 지시를 덧붙인 입력은 사용자 입력으로 처리한다. 호스트가
 Stop 주입 뒤 스스로 재개하는 경우는 자기 프롬프트 본문이 없으므로 리셋되지 않고, 그때 나가는
 발신은 여전히 `caused`로 계산된다.
 
@@ -198,3 +199,6 @@ prune은 지울 메시지를 파일로 남긴 뒤에만 삭제하므로(`~/.page
 
 훅 등록 명령은 [../README.ko.md](../README.ko.md#설치)에, 어느 이벤트를 걸 것인가는
 [reference.ko.md](reference.ko.md#훅-등록--어느-이벤트를-걸-것인가)에 있다.
+
+사용자 지정 DB의 아카이브 경로는 reference.ko.md 규칙을 따른다. 파일명이 msg.db인
+경우에만 기존의 같은 디렉터리 archive.jsonl 경로를 유지한다.

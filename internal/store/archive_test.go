@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/iMUngHee/pager/internal/clock"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -695,4 +697,76 @@ func keysOf(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestArchivesIsolateDatabasesInOneDirectory(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for _, name := range []string{"msg.db", "a.db", "b.db"} {
+		st, err := Open(t.Context(), filepath.Join(dir, name), clock.NewFake(testBase))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		id := insertDelivered(t, st, 31*24*time.Hour)
+		if _, err := st.Exec(t.Context(), "UPDATE messages SET body=? WHERE id=?", name, id); err != nil {
+			t.Fatal(err)
+		}
+		wg.Go(func() {
+			if _, err := st.PruneNow(t.Context(), DefaultRetention, false); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	for _, name := range []string{"msg.db", "a.db", "b.db"} {
+		path := filepath.Join(dir, name+".archive.jsonl")
+		if name == "msg.db" {
+			path = filepath.Join(dir, "archive.jsonl")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &rec); err != nil {
+			t.Errorf("mixed or malformed archive %s: %v", name, err)
+			continue
+		}
+		if rec.Body != name {
+			t.Errorf("%s contains %q", name, rec.Body)
+		}
+	}
+}
+
+func TestAutomationSurvivesExportAndPrune(t *testing.T) {
+	st, _ := newStore(t)
+	id := insertDelivered(t, st, 31*24*time.Hour)
+	if _, err := st.Exec(t.Context(), "UPDATE messages SET automation='gaebu',sender_label='automation:gaebu' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	lines := exportLines(t, st)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"automation":"gaebu"`) {
+		t.Fatalf("export lost automation: %q", lines)
+	}
+	if _, err := st.PruneNow(t.Context(), DefaultRetention, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(archivePath(st.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(raw)) != lines[0] {
+		t.Fatalf("archive differs from export: %s", raw)
+	}
+}
+
+func TestLegacyExportOmitsAutomation(t *testing.T) {
+	st, _ := newStore(t)
+	insertHuman(t, st, "legacy", false)
+	line := exportLines(t, st)[0]
+	if strings.Contains(line, `"automation"`) {
+		t.Fatalf("legacy bytes gained a field: %s", line)
+	}
 }

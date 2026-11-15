@@ -25,7 +25,7 @@ const (
 var (
 	// ErrUnattributed is the fail-closed default: a send that cannot say which
 	// session it came from is refused rather than recorded anonymously.
-	ErrUnattributed = errors.New("no session context: pass --session, set PAGER_SESSION, or assert --human")
+	ErrUnattributed = errors.New("no session context: pass --session, set PAGER_SESSION, assert --human, or use --automation")
 	// ErrHopExceeded rejects unavailable or overflowing causal state; it is
 	// not a normal conversation-length quota.
 	ErrHopExceeded = errors.New("causal depth is unavailable or out of range")
@@ -59,12 +59,13 @@ const MaxRelayBody = 64 << 10
 // writes the message, so a caller cannot understate its own depth.
 type SendRequest struct {
 	Metadata
-	Alias  string // resolved target alias, or "name@peer" for a remote send
-	Peer   string // registered peer for a remote send; empty for local mail
-	Body   string
-	Sender string // sending session; empty when unattributed
-	Label  string // how the recipient sees the sender
-	Human  bool   // operator assertion: send as human-origin, breaking the chain
+	Alias      string // resolved target alias, or "name@peer" for a remote send
+	Peer       string // registered peer for a remote send; empty for local mail
+	Body       string
+	Sender     string // sending session; empty when unattributed
+	Label      string // how the recipient sees the sender
+	Human      bool   // operator assertion: send as human-origin, breaking the chain
+	Automation string // local send-only producer; independent of session identity
 }
 
 // Sent reports what was written.
@@ -85,7 +86,19 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 	if strings.TrimSpace(req.Alias) == "" {
 		return Sent{}, errors.New("send: no target alias")
 	}
-	if !req.Human && req.Sender == "" {
+	if req.Automation != "" {
+		if req.Human || req.Sender != "" || req.Peer != "" {
+			return Sent{}, errors.New("automation requires a local target and cannot use a session or human assertion")
+		}
+		invalid := strings.IndexFunc(req.Automation, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-')
+		})
+		if len(req.Automation) > 48 || invalid >= 0 {
+			return Sent{}, errors.New("automation name must be 1..48 lowercase ASCII letters, digits, dots, underscores or hyphens")
+		}
+		req.Label = "automation:" + req.Automation
+	}
+	if !req.Human && req.Sender == "" && req.Automation == "" {
 		return Sent{}, ErrUnattributed
 	}
 	if req.Peer != "" {
@@ -114,7 +127,7 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 			var body, kind, progress, activity string
 			err := c.QueryRowContext(ctx, `SELECT id,hop,origin,wake_note,body,event_kind,progress,activity,
               delivered_at IS NOT NULL OR listed_at IS NOT NULL FROM messages
-              WHERE COALESCE(sender_session,'')=? AND alias=? AND task=? AND event_id=? AND src_peer IS NULL`, req.Sender, req.Alias, req.Task, req.EventID).Scan(&out.ID, &out.Hop, &out.Origin, &out.PauseReason, &body, &kind, &progress, &activity, &out.AlreadyRead)
+              WHERE automation=? AND COALESCE(sender_session,'')=? AND alias=? AND task=? AND event_id=? AND src_peer IS NULL`, req.Automation, req.Sender, req.Alias, req.Task, req.EventID).Scan(&out.ID, &out.Hop, &out.Origin, &out.PauseReason, &body, &kind, &progress, &activity, &out.AlreadyRead)
 			if err == nil {
 				if body != req.Body || kind != req.Kind || progress != req.Progress || activity != req.Activity {
 					return fmt.Errorf("event_id %q was already used with different content", req.EventID)
@@ -163,10 +176,10 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 
 		res, err := c.ExecContext(ctx, `
 			INSERT INTO messages(alias, sender_session, sender_label, body, hop, origin, cause_id, created_at,
-			                     dst_peer, dst_link, dst_seq,task,event_kind,activity,progress,event_id,recipient_session)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			                     dst_peer, dst_link, dst_seq,task,event_kind,activity,progress,event_id,recipient_session,automation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			req.Alias, nullable(req.Sender), req.Label, req.Body, hop, origin, cause, st.Now(),
-			nullable(req.Peer), link, seq, req.Task, req.Kind, req.Activity, req.Progress, nullable(req.EventID), nullable(recipient))
+			nullable(req.Peer), link, seq, req.Task, req.Kind, req.Activity, req.Progress, nullable(req.EventID), nullable(recipient), req.Automation)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -187,6 +200,9 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 		}
 		return nil
 	})
+	if err == nil && req.Automation != "" {
+		out.Origin = "automation"
+	}
 	return out, err
 }
 
@@ -202,7 +218,7 @@ func Send(ctx context.Context, st *store.Store, req SendRequest) (Sent, error) {
 // the depth is treated as beyond the limit rather than as zero. Otherwise
 // waiting for a prune would launder a chain back to the start.
 func causalDepth(ctx context.Context, c *sql.Conn, req SendRequest) (hop int, origin string, cause any, err error) {
-	if req.Human {
+	if req.Human || req.Automation != "" {
 		return 0, OriginHuman, nil, nil
 	}
 

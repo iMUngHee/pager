@@ -291,7 +291,7 @@ peer의 `name@peer`, 그것도 아니면 `unknown peer`. 부분 문자열 단계
 `kipa@vm`이 로컬의 `kipa@vm2`에 조용히 맞는 것은 엉뚱한 머신으로 배달된 메일이기 때문이다. 새
 alias에는 `@`를 쓸 수 없다. `@`가 없는 대상은 예전과 똑같이 해석된다.
 
-원격 send도 다른 send와 똑같이 검사되고 기록된다(hop과 rate limit 포함). 다만 큐에 들어간다:
+원격 send도 다른 send와 똑같이 검사되고 기록된다(hop과 메타데이터 검사 포함). 다만 큐에 들어간다:
 `sent #12 to kipa@vm (hop 0, human)` / `queued for peer vm; it leaves when the relay next runs`.
 poke는 하지 않는다. 받는 쪽 저장소가 메시지를 수입할 때 자기 세션을 깨운다. 원격 본문은 64 KiB까지다.
 
@@ -655,3 +655,45 @@ tmux 상태 배지와 오버레이 TUI는 후속 단계다.
 재시도 중복 제거를 검사하며 임시 증거를 보존한다. 실험적 큐 API와 네임스페이스
 MCP 호출이 필요하다(Codex 0.165.0-alpha.1.2에서 검증). Windows에서 실제 실행했으며
 macOS/Linux 실행은 미검증이다.
+
+## 타이머 알림과 재알림 회차
+
+0.8.0부터 발신 세션이나 사전 등록 없이 호출할 수 있다.
+
+```sh
+pager send "$RECIPIENT" "$BODY" --automation gaebu-stalled \
+  --task "$TEAM_KEY" --kind failure --event "$FINDING_KEY-r$ROUND"
+```
+
+수신자와 같은 OS 사용자로 실행하거나 `PAGER_DB`를 수신자의 DB로 지정한다.
+`PAGER_SESSION`과 `CODEX_THREAD_ID`는 필요 없고 자동화 발신에서는 무시한다.
+이름은 소문자 ASCII 영문·숫자·점·밑줄·하이픈 1–48자다. `--human`, `--session`,
+`--label`과 조합할 수 없으며 원격 `name@peer` 대상은 지원하지 않는다.
+표시 이름은 `automation:<이름>`이고 수신함이나 답장 주소는 없다. 깨우기 형식은 기존
+`pager: new mail for ... [pager-poke]`를 유지한다. 표시 이름은 인증 정보가 아니다.
+내보낸 `automation` 필드가 출처 정보이며 기존 `origin=human`은 로컬 원인이 없다는 뜻이다.
+
+event 중복 판정 범위는 발신자·해결된 수신 별칭·task·event ID다. 같은 회차의 재시도는
+본문·kind·activity·progress를 그대로 유지해야 한다. 같은 event는 원래 메시지 ID를
+반환하고 내용 변경은 거부한다. 읽은 event는 다시 깨우지 않는다. 다음 재알림은
+`finding-r2`처럼 새 event를 쓴다. 재시도 전에 회차와 본문을 저장하고, 해결된 발견이 다시
+발생하면 새로운 발생 key를 쓴다. event는 UTF-8 256바이트, task는 128바이트까지다.
+중복 방지는 DB에 행이 남아 있는 동안만 보장하며 prune 뒤까지 영구 보장하지 않는다.
+`--event`를 생략하면 호출마다 새 메시지를 만든다.
+
+실제 미해결 실패에만 `--kind failure`를 쓰고 단순 확인은 `update`를 쓴다. 타이머의
+재알림 간격·횟수 제한·종료 조건은 호출자가 관리한다. 발신 전용 프로세스는 양방향 세션
+idle 제어 대상이 아니다. hop 0에서 시작하고 수신자의 답장은 정상 인과 관계를 유지한다.
+
+### 사용자 지정 DB의 아카이브
+
+기본 `~/.pager/msg.db`는 기존 `~/.pager/archive.jsonl`을 유지한다. 파일명이 `msg.db`인
+DB는 같은 디렉터리의 이 이름을 사용한다. 다른 DB는 `<DB 경로>.archive.jsonl`을 사용한다.
+경로 대소문자를 일관되게 사용한다. 같은 DB를 가리키는 심볼릭 링크·하드링크·대소문자 별칭은
+이 경로 규약의 범위 밖이다.
+
+0.8.0 이전에는 같은 디렉터리의 모든 DB가 `archive.jsonl`을 공유했다. 이 파일은 보존하며
+기존 레코드를 원래 DB별로 안전하게 분리할 수는 없다. 전체 이력은 기존 공유 파일, 새 DB별
+아카이브, 같은 `PAGER_DB`로 실행한 `pager export`를 합쳐야 한다. 기존 이력에는 다른 DB의
+메시지도 섞여 있을 수 있다. 모든 쓰기 프로세스를 업그레이드해야 분리가 보장된다.
+schema 6은 구버전 바이너리가 열 수 없으므로 실행 중인 MCP 서버도 재시작한다.

@@ -212,13 +212,13 @@ func updateCodexQueue(ctx context.Context, thread, body string, clearing *store.
 				} `json:"error"`
 			}
 			if err := dec.Decode(&response); err != nil {
-				return nil, fmt.Errorf("Codex queue protocol: %w", err)
+				return nil, fmt.Errorf("codex queue protocol: %w", err)
 			}
 			if response.ID == nil || *response.ID != requestID {
 				continue
 			}
 			if response.Error != nil {
-				return nil, fmt.Errorf("Codex %s: %s (%d)", method, response.Error.Message, response.Error.Code)
+				return nil, fmt.Errorf("codex %s: %s (%d)", method, response.Error.Message, response.Error.Code)
 			}
 			return response.Result, nil
 		}
@@ -251,12 +251,12 @@ func updateCodexQueue(ctx context.Context, thread, body string, clearing *store.
 			return err
 		}
 		if page.Data == nil {
-			return fmt.Errorf("Codex queue/list response has no data array")
+			return fmt.Errorf("codex queue/list response has no data array")
 		}
 		for _, item := range *page.Data {
 			if len(item.Input) == 1 && item.Input[0].Type == "text" && deliver.IsPokePrompt(item.Input[0].Text) {
 				if item.ID == "" {
-					return fmt.Errorf("Codex queued notification has no id")
+					return fmt.Errorf("codex queued notification has no id")
 				}
 				pending = append(pending, item.ID)
 			}

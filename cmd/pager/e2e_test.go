@@ -988,3 +988,35 @@ func TestWhoHistoryAndExplicitUnknownClaim(t *testing.T) {
 		t.Fatalf("holder=%s err=%v", holder, err)
 	}
 }
+
+func TestAutomationTimerSend(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAGER_DB", filepath.Join(dir, "msg.db"))
+	mustRun(t, "attach", "--session", "recipient", "--tool", "claude", "--root", dir)
+	mustRun(t, "alias", "--session", "recipient", "inbox")
+	t.Setenv("PAGER_SESSION", "unregistered-ambient-session")
+	args := []string{"send", "inbox", "still stalled", "--automation", "gaebu-stalled", "--task", "team", "--kind", "failure", "--event", "finding-r1"}
+	first := mustRun(t, args...)
+	if !strings.Contains(first, "hop 0, automation") {
+		t.Fatalf("receipt: %s", first)
+	}
+	retry := mustRun(t, args...)
+	if strings.Split(first, "\n")[0] != strings.Split(retry, "\n")[0] {
+		t.Fatalf("retry changed identity: %s / %s", first, retry)
+	}
+	records := mustRun(t, "export")
+	if strings.Count(records, "\n") != 1 || !strings.Contains(records, `"automation":"gaebu-stalled"`) || !strings.Contains(records, `"sender_session":null`) {
+		t.Fatalf("export: %s", records)
+	}
+	if out := mustRun(t, "ls", "--session", "recipient"); !strings.Contains(out, "automation:gaebu-stalled") {
+		t.Fatalf("listing: %s", out)
+	}
+	for _, flags := range [][]string{{"--automation", ""}, {"--automation", "BAD"}, {"--automation", "a\nb"}, {"--automation", strings.Repeat("a", 49)}, {"--automation", "gaebu", "--human"}, {"--automation", "gaebu", "--session", "recipient"}, {"--automation", "gaebu", "--label", "human"}} {
+		if _, err := capture(t, "", append([]string{"send", "inbox", "bad"}, flags...)...); err == nil {
+			t.Errorf("accepted invalid flags %q", flags)
+		}
+	}
+	if out := mustRun(t, "export"); out != records {
+		t.Fatalf("refusal inserted mail: %s", out)
+	}
+}

@@ -108,7 +108,7 @@ uses the request identity above, independently on every call.
 | 2 | `PAGER_SESSION` environment variable | Explicit process configuration |
 | 3 | `CODEX_THREAD_ID` | CLI with a detected Codex host; missing ID refuses host fallback |
 | 4 | Host detection → look up the active session the hook recorded | Other clients, including Claude CLI/MCP |
-| 5 | Failure → `unattributed` | **Refused** by default (without `--human`) |
+| 5 | Failure → `unattributed` | **Refused** by default (without `--human` or `--automation`) |
 
 ## There are two addressing layers — the automatic name is not a third
 
@@ -238,11 +238,11 @@ UPDATE sessions
 ```
 
 **Invariant: at most one row holds any given `(host_client, host_pid,
-host_start)`.** Statement 1 guarantees it, and the tier-3 lookup rests on it.
+host_start)`.** Statement 1 guarantees it, and the host-source lookup rests on it.
 If the invariant breaks, the lookup meets multiple rows and cannot tell which
 session it is, so **it is pinned by tests.**
 
-### The tier-3 lookup
+### The host-source lookup
 
 ```sql
 SELECT session_id FROM sessions
@@ -250,7 +250,7 @@ SELECT session_id FROM sessions
    AND heartbeat_at >= :cutoff;
 ```
 
-Zero rows falls through to tier 4 (`unattributed`). Thanks to the invariant
+Zero rows falls through to the unattributed result. Thanks to the invariant
 above it cannot exceed one row.
 
 ## Why pid reuse does not cause misdelivery
@@ -263,9 +263,9 @@ Suppose the host died and an unrelated process inherited its pid. Calling
 `(client, pid, start)` **as detected by the caller itself.**
 
 - If the new process is not a claude/codex host → ancestor matching fails →
-  detection fails → tier 4
+  detection fails → the unattributed result
 - If it is a claude/codex host → its start time differs, so `start` differs →
-  zero rows → tier 4
+  zero rows → the unattributed result
 
 That is, **the lookup key is only ever built from a living caller**, so there is
 no way to reach a dead host's stale row. What the `heartbeat_at` cutoff guards
@@ -278,7 +278,7 @@ refused.
 | Situation | Result |
 | --- | --- |
 | Host restart | pid or start differs, so it is a **new key**. The old row matches no caller through that key. Claiming is separate: a proven-gone dedicated host permits it; stale unknown requires `--allow-unknown`, and loaded Codex threads remain protected |
-| `/clear` or resume on the same host | Same pid, new session_id → key transfer, so **the new session inherits**. The old session's row has NULL host_\* and is unreachable via tier 3 |
+| `/clear` or resume on the same host | Same pid, new session_id → key transfer, so **the new session inherits**. The old session's row has NULL host_\* and is unreachable via the host lookup |
 | claude and codex at once in the same project | `host_client` differs, so the keys differ → no interference |
 | Two instances of the same tool (different windows) | pids differ, so the keys differ → no interference |
 | One session across several workspaces | Irrelevant, since session_id is the axis. Alias isolation is guaranteed separately by `root + tool` |
@@ -302,7 +302,7 @@ snapshot are not transactionally synchronized with this write.
 ## fail-closed
 
 Failed detection and a zero-row lookup fall **toward refusal**. In the
-`unattributed` state, a send without `--human` exits non-zero and is not
+`unattributed` state, a send without `--human` or `--automation` exits non-zero and is not
 inserted into the queue.
 
 The cost of this choice is clear: if the host process structure changes,
@@ -313,7 +313,7 @@ direction.
 **The hook path is the exception.** Hooks must be fail-open on every path
 (exit 0, no stdout), because a failing hook blocks the session itself. Hooks
 know their own session from tier 1 (`--session`), so they do not depend on
-tier 3 of this contract.
+the host lookup of this contract.
 
 ## `--human` is not a check
 
@@ -342,14 +342,30 @@ darwin, linux and windows paths diverge, so a bump needs the
   `claude`/`codex`, detection fails. `PAGER_CLIENT` can override the label, but
   it cannot override a failed ancestor match.
 - **The host stops running the CLI as a descendant** — a broken parent chain
-  disables tier 3. Then the session must be named explicitly via tier 1
+  disables the host lookup. Then the session must be named explicitly via tier 1
   (`--session`) or tier 2 (`PAGER_SESSION`).
 - **A wrapper chain deeper than 16 levels** — detection fails.
 - **The host's start token cannot be read** — windows only, and it costs that
-  session tier 3 rather than the platform. See "A host without a readable token
+  session the host lookup rather than the platform. See "A host without a readable token
   is refused" above.
 - **Anything other than darwin, linux or windows** — process inspection is
-  unimplemented, so tier 3 always fails. Only tiers 1 and 2 work.
+  unimplemented, so the host lookup always fails. Only tiers 1 and 2 work.
 
 All of these fail closed, and the first two surface immediately by blocking CLI
 sends outright.
+
+## Sessionless automation
+
+`send --automation <name>` is a separate local-only producer path, not another
+session resolution tier. It ignores ambient session identity, rejects explicit
+`--session`, `--human` and `--label`, and requires no registration. Names are
+1–48 lowercase ASCII letters, digits, dots, underscores or hyphens. The fixed
+label is `automation:<name>`; the producer has no inbox or reply address.
+
+The stored `automation` field is provenance; a label alone is not authenticated
+and can be imitated by another sender. The legacy SQL `origin=human` value means
+no local cause row, including relay imports and automation; it does not prove a
+human sent the message. Automation receipts say `automation`, start at hop 0,
+and a recipient's reply retains the delivered message as its cause. A timer
+must not use this path to disguise a session's reply. Timer scheduling, backoff
+and stopping belong to the caller. See reference.md for event retry rules.

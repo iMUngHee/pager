@@ -308,7 +308,7 @@ func startsNewTurn(event string, in Input) bool {
 	if prompt == "" {
 		return false
 	}
-	return !strings.Contains(prompt, deliver.PokeSentinel)
+	return !deliver.IsPokePrompt(prompt)
 }
 
 // canonicalEvent maps an event name onto its canonical spelling, ignoring case.

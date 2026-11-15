@@ -175,6 +175,7 @@ func TestMigrationsAreAppendOnly(t *testing.T) {
 		"fa2044e78bcdadaa98616e6bea55f78f2e27910d4497ff96dbdf2b2dcc345747", // 2 -> 3 (purpose)
 		"9c304fea494ce99599800273d411ff86bc2bd3a5f922f41ec550701d0e0e2cb1", // 3 -> 4 (relay)
 		"fe335b8d5e1f59edc959e1b0ef5298ed89443319ef744f157616b241929b1725", // 4 -> 5 (cooperative loop metadata)
+		"f27e063288162bd490904f2b0f1ea90a5329ba6e64582c7ee4d899f1058d186b", // 5 -> 6 (automation identity)
 	}
 	if len(want) != len(migrations) {
 		t.Fatalf("%d migrations but %d digests — append the new entry's digest", len(migrations), len(want))
@@ -512,7 +513,7 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	// Six entries, joined at 1: five run, and the version recorded must be 6 —
+	// Seven entries, joined at 1: six run, and the version recorded must be 7 —
 	// the length of what ran, not schemaVersion.
 	//
 	// The list grows whenever a real migration lands, because its whole job is
@@ -527,6 +528,7 @@ func TestTheRecordedVersionIsWhatWasReplayed(t *testing.T) {
 		`ALTER TABLE messages ADD COLUMN probe_only_too INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only_three INTEGER`,
 		`ALTER TABLE messages ADD COLUMN probe_only_four INTEGER`,
+		`ALTER TABLE messages ADD COLUMN probe_only_five INTEGER`,
 	}
 	if len(longer) == schemaVersion {
 		t.Fatalf("the fixture list is %d long, the same as schemaVersion — it cannot tell them apart", len(longer))
@@ -601,5 +603,36 @@ func TestConcurrentUpgrade(t *testing.T) {
 			VALUES ('inbox', 'after the upgrade', 0, 'human', ?)`, i); err != nil {
 			t.Errorf("opener %d cannot write after upgrading: %v", i, err)
 		}
+	}
+}
+
+func TestUpgradeAutomationPreservesLegacyEvent(t *testing.T) {
+	path := openAtVersion(t, 5)
+	db, err := sql.Open("sqlite", dsn(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("INSERT INTO messages(alias,body,hop,origin,created_at,event_id) VALUES('inbox','legacy',0,'human',1,'event')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := Open(t.Context(), path, clock.NewFake(testBase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var body, automation string
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT body,automation FROM messages WHERE event_id='event'").Scan(&body, &automation); err != nil {
+		t.Fatal(err)
+	}
+	if body != "legacy" || automation != "" {
+		t.Fatalf("migration changed old event: %q/%q", body, automation)
+	}
+	if _, err := st.Exec(t.Context(), "INSERT INTO messages(alias,body,hop,origin,created_at,event_id) VALUES('inbox','duplicate',0,'human',1,'event')"); err == nil {
+		t.Fatal("old event uniqueness lost")
+	}
+	if _, err := st.Exec(t.Context(), "INSERT INTO messages(alias,body,hop,origin,created_at,event_id,automation) VALUES('inbox','timer',0,'human',1,'event','gaebu')"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -11,7 +11,23 @@
 - Caller identity remains subject to the existing hook freshness and host-key
   rules. Runtime observations do not authorize a caller.
 
+## Automation and archive paths (0.8.0)
+
+- Linux: timer CLI send/export/hook flows and schema 5-to-6 preservation were
+  exercised with isolated databases. Literal URI punctuation paths, concurrent
+  archive separation and prompt recognition have regression coverage.
+- macOS arm64 and Windows amd64: pure-Go cross-builds succeeded. Native timer
+  execution and filesystem behavior remain pending below.
+- Windows filename rules exclude `?`; its path regression runs on other systems.
+  Literal `#` and `%` filenames are covered on every platform by the test suite.
+
 ## Pending checks
+
+- macOS/Windows: run the 0.8.0 suite natively, including custom archive paths,
+  literal URI punctuation and OS-timer automation sends. Consistent database
+  path spelling (including case) is required; aliases of the same underlying
+  file are outside the archive naming contract.
+
 
 - macOS: native control-socket runtime observation and end-to-end process probes
   were not run locally; cross-compilation is checked separately.

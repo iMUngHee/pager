@@ -782,3 +782,52 @@ idle exchanges stop waking; a resource-release event bypasses the pause and is
 deduplicated on retry. The script requires experimental queue APIs and namespaced
 MCP calls (tested with Codex 0.165.0-alpha.1.2). It retains its temporary evidence.
 Windows was run natively; macOS/Linux execution remains pending.
+
+## Timer notifications and reminder rounds
+
+Since 0.8.0, a timer can send without a sender session or a registration step:
+
+```sh
+pager send "$RECIPIENT" "$BODY" --automation gaebu-stalled \
+  --task "$TEAM_KEY" --kind failure --event "$FINDING_KEY-r$ROUND"
+```
+
+Run as the same OS user as the recipients, or explicitly set `PAGER_DB` to their
+store. No `PAGER_SESSION` or `CODEX_THREAD_ID` is needed; automation ignores them.
+Names are 1–48 lowercase ASCII letters, digits, dots, underscores or hyphens.
+Do not combine `--automation` with `--human`, `--session` or `--label`. Remote
+`name@peer` targets are not supported for automation. Its fixed visible name is
+`automation:<name>`, a send-only producer with no inbox or reply address. The
+normal `pager: new mail for ... [pager-poke]` wake format remains unchanged.
+Labels are not authenticated; use exported automation provenance when inspecting
+records. The legacy `origin=human` column means no local cause, not human proof.
+
+Event identity includes producer, resolved recipient alias, task and event ID.
+For a retry, preserve body, kind, activity and progress exactly. The same event
+returns its original message ID; changing those fields is refused. A read event
+is not woken again. A later reminder is a new event, for example `finding-r2`.
+Persist the round and its payload before retrying; give a recurrent finding a
+new occurrence key after it was resolved. Event IDs allow at most 256 UTF-8 bytes
+and tasks 128. Deduplication lasts while the row exists in this database, not
+forever after pruning. Omitting `--event` means every send creates new mail.
+
+Use `--kind failure` only for a genuine unresolved failure. Acknowledgements use
+`update`. Timers own bounded backoff and stop conditions; pager does not schedule
+reminders or apply the two-session idle-exchange guard to a send-only producer.
+Automation starts hop 0; normal recipient replies still inherit their cause.
+
+### Archives with custom database paths
+
+The default `~/.pager/msg.db` retains `~/.pager/archive.jsonl`. Any database named
+`msg.db` retains that sibling archive name. Other paths use
+`<database path>.archive.jsonl`; for example `/tmp/team.db.archive.jsonl`.
+Use a consistent path spelling, including case. Symlink/hardlink aliases and
+case aliases to the same underlying database are outside this naming contract.
+
+Before 0.8.0 all databases in one directory shared `archive.jsonl`. Keep that
+legacy file; pager cannot safely separate its records by original database.
+For full custom-DB history, include that legacy archive, the new per-DB archive
+and `pager export` with the same `PAGER_DB`. Legacy history may contain records
+from other databases. Upgrade every writer before relying on this separation.
+Schema 6 cannot be opened by older binaries; restart running MCP servers after
+upgrading. No live database downgrade is provided.

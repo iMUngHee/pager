@@ -620,8 +620,7 @@ func TestPokeDoesNotResetCausal(t *testing.T) {
 	}
 
 	queue(t, st, "inbox", "@a", "second")
-	poke := "pager: new mail for inbox from @a. " + deliver.PokeSentinel +
-		" If it is not shown with this turn, run: msg_list"
+	poke := wake.PokeBody("inbox", "@a", "")
 	body := additionalContext(t, run(t, EventUserPromptSubmit, claudePayload("s1", poke)))
 
 	if !strings.Contains(body, "second") {
@@ -836,24 +835,46 @@ func TestPokeDoesNotBecomeThePurpose(t *testing.T) {
 	}
 }
 
-// TestQuotedSentinelKeepsThePurpose pins an accepted imprecision rather than a
-// requirement.
-//
-// startsNewTurn matches the sentinel as a substring, so a genuine prompt that
-// quotes it is refused too. The alternative is a second definition of "this is
-// a poke", which is the drift the shared predicate exists to avoid, and the
-// cost of the imprecision is a stale purpose rather than a fabricated one.
-func TestQuotedSentinelKeepsThePurpose(t *testing.T) {
+func TestQuotedSentinelUpdatesPurposeAndEpoch(t *testing.T) {
+	for _, prompt := range []string{"Explain " + deliver.PokeSentinel, "Explain " + wake.PokeBody("inbox", "sender", ""), wake.PokeBody("inbox", "sender", "") + " Also do my work", wake.PokeBody("inbox", "sender", "") + "\nAlso do my work"} {
+		t.Run(prompt, func(t *testing.T) {
+			st := newEnv(t)
+			detectionOff(t)
+			seedSessionOnly(t, st, "s1", "claude")
+			run(t, EventUserPromptSubmit, claudePayload("s1", "previous task"))
+			run(t, EventUserPromptSubmit, claudePayload("s1", prompt))
+			if got := purposeOf(t, st, "s1"); got != deliver.Purpose(prompt) {
+				t.Fatalf("purpose=%q", got)
+			}
+			var epoch int
+			if err := st.DB().QueryRowContext(t.Context(), "SELECT causal_epoch FROM sessions WHERE session_id='s1'").Scan(&epoch); err != nil {
+				t.Fatal(err)
+			}
+			if epoch != 2 {
+				t.Fatalf("epoch=%d, want 2", epoch)
+			}
+		})
+	}
+}
+
+func TestMultilineSenderConsumedPokeIsBlocked(t *testing.T) {
 	st := newEnv(t)
 	detectionOff(t)
-	seedSessionOnly(t, st, "s1", "claude")
-
-	run(t, EventUserPromptSubmit, claudePayload("s1", "픽스처 정리 중"))
-	run(t, EventUserPromptSubmit,
-		claudePayload("s1", "왜 "+deliver.PokeSentinel+" 가 프롬프트에 들어가는지 봐줘"))
-
-	if got, want := purposeOf(t, st, "s1"), "픽스처 정리 중"; got != want {
-		t.Errorf("purpose = %q, want the previous value %q kept", got, want)
+	seedInbox(t, st, "s1", "codex", "inbox")
+	run(t, EventUserPromptSubmit, codexPayload("s1", "previous task"))
+	raw := run(t, EventUserPromptSubmit, codexPayload("s1", wake.PokeBody("inbox", "sender\nsecond line", "claude")))
+	if !strings.Contains(raw, `"decision":"block"`) {
+		t.Fatalf("consumed poke was not blocked: %s", raw)
+	}
+	if got := purposeOf(t, st, "s1"); got != "previous task" {
+		t.Fatalf("purpose=%q", got)
+	}
+	var epoch int
+	if err := st.DB().QueryRowContext(t.Context(), "SELECT causal_epoch FROM sessions WHERE session_id='s1'").Scan(&epoch); err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 1 {
+		t.Fatalf("poke changed epoch to %d", epoch)
 	}
 }
 

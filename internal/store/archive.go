@@ -18,10 +18,7 @@ import (
 // redefining one does bump it.
 const archiveVersion = 1
 
-// archiveName is the file that lives beside the database. It is not derived
-// from the environment: a store archives to whatever database it actually
-// opened, so isolating a test or a second set of sessions with PAGER_DB
-// isolates its archive too.
+// archiveName preserves the historical archive path for msg.db.
 const archiveName = "archive.jsonl"
 
 // archiveTime renders a timestamp as RFC3339 in UTC with exactly three
@@ -86,16 +83,20 @@ type Record struct {
 	EventID          *string `json:"event_id,omitempty"`
 	RecipientSession *string `json:"recipient_session,omitempty"`
 	WakeNote         string  `json:"wake_note,omitempty"`
+	Automation       string  `json:"automation,omitempty"`
 }
 
 // recordColumns is the SELECT list Record scans, in Record's own order.
 const recordColumns = `id, created_at, alias, sender_session, sender_label,
 	origin, cause_id, hop, delivered_at, delivery_seq, listed_at,
-	src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result, body,task,event_kind,activity,progress,event_id,recipient_session,wake_note`
+	src_peer, src_store, src_id, src_from, dst_peer, dst_link, dst_seq, relayed_at, relay_result, body,task,event_kind,activity,progress,event_id,recipient_session,wake_note,automation`
 
 // archivePath is where a database's archive lives.
 func archivePath(dbPath string) string {
-	return filepath.Join(filepath.Dir(dbPath), archiveName)
+	if filepath.Base(dbPath) == "msg.db" {
+		return filepath.Join(filepath.Dir(dbPath), archiveName)
+	}
+	return dbPath + ".archive.jsonl"
 }
 
 // archiveEnabled reports whether prune should archive before deleting.
@@ -255,7 +256,7 @@ func eachRecord(rows *sql.Rows, fn func(Record) error) error {
 		if err := rows.Scan(&r.ID, &created, &r.Alias, &sender, &r.SenderLabel,
 			&r.Origin, &cause, &r.Hop, &delivered, &seq, &listed,
 			&srcPeer, &srcStore, &srcID, &srcFrom, &dstPeer, &dstLink, &dstSeq, &relayed, &result,
-			&r.Body, &r.Task, &r.EventKind, &r.Activity, &r.Progress, &eventID, &recipient, &r.WakeNote); err != nil {
+			&r.Body, &r.Task, &r.EventKind, &r.Activity, &r.Progress, &eventID, &recipient, &r.WakeNote, &r.Automation); err != nil {
 			return fmt.Errorf("scan message: %w", err)
 		}
 		r.EventID, r.RecipientSession = nullString(eventID), nullString(recipient)

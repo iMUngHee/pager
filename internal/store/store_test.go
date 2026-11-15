@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -484,7 +485,7 @@ func TestPruneOpportunisticRunsOnce(t *testing.T) {
 	}
 }
 
-// TestHostKeyUniqueness pins the session-binding invariant that priority-3
+// TestHostKeyUniqueness pins the session-binding invariant that host-based
 // resolution rests on: at most one session row may hold a given host key.
 func TestHostKeyUniqueness(t *testing.T) {
 	s, _ := newStore(t)
@@ -807,5 +808,41 @@ func TestManualPruneReleasesTheLeaseOnFailure(t *testing.T) {
 	}
 	if err == nil {
 		t.Error("the retry reported success although the archive is still blocked")
+	}
+}
+
+func TestDatabasePathURIPunctuation(t *testing.T) {
+	names := []string{"hash#part.db", "percent%23part.db", "space name.db"}
+	if runtime.GOOS != "windows" {
+		names = append(names, "query?mode=memory.db")
+	}
+	for i, name := range names {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			st, err := Open(t.Context(), path, clock.NewFake(testBase))
+			if err != nil {
+				t.Fatal(err)
+			}
+			insertHuman(t, st, "kept", false)
+			st.Close()
+			if _, err := os.Stat(path); err != nil {
+				t.Fatal(err)
+			}
+			st, err = Open(t.Context(), path, clock.NewFake(testBase))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if countMessages(t, st) != 1 {
+				t.Fatal("reopen lost data")
+			}
+			var fk int
+			if err := st.DB().QueryRowContext(t.Context(), "PRAGMA foreign_keys").Scan(&fk); err != nil {
+				t.Fatal(err)
+			}
+			if fk != 1 {
+				t.Fatal("path swallowed connection pragmas")
+			}
+		})
 	}
 }
