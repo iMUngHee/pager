@@ -18,6 +18,27 @@ Entries 0.1.0 to 0.5.0 were written on 2026-11-04 from the commit history.
 pager had no versions then, so their boundaries were drawn afterwards along
 the history's natural stages. The MCP server reported `0.1.0` throughout.
 
+## 0.8.1 — 2026-11-17
+
+### Changed
+
+- The wake notification ends with `If mail is missing, run msg_list.` instead
+  of the longer sentence that also described `pager ls`. Every poke repeats
+  this hint, and the hook normally renders the mail on the same turn. The
+  `pager: new mail for ... [pager-poke]` prefix is unchanged. (b890527)
+
+### Upgrading
+
+No schema or relay protocol change. This binary recognizes both the new and
+the 0.8.0 notification, so an MCP server still running 0.8.0 and a Codex queue
+holding older notifications keep working.
+
+The reverse does not hold: a 0.8.0 hook treats the new notification as a typed
+prompt, which resets the recipient's causal state and lets an already-handled
+wake start an empty turn. Mail is still delivered. Replace the binary the hooks
+run before reconnecting MCP servers, and restart those servers before rolling
+back to 0.8.0.
+
 ## 0.8.0 — 2026-11-16
 
 ### Added
