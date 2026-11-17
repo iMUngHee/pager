@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -209,6 +210,24 @@ func TestCodexQueueRepairsDuplicatesAndPreservesUserInput(t *testing.T) {
 	}
 	if n := queueCount(t, db, "t1"); n != 2 {
 		t.Fatalf("queue entries=%d, want 1 wake + 1 user input", n)
+	}
+}
+
+// A queue filled by a 0.8.0 sender holds the long hint. A sender must count
+// that entry as the pending wake rather than add a second one.
+func TestCodexQueueCoalescesWithLegacyNotification(t *testing.T) {
+	db := nativeQueueFixture(t)
+	legacy := "pager: new mail for box from sender (claude session). [pager-poke] If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."
+	raw, _ := json.Marshal([]map[string]string{{"type": "text", "text": legacy}})
+	if _, err := db.Exec("INSERT INTO fixture_queue(thread,input) VALUES('t1',?)", string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	err := runCodexQueue(t.Context(), "t1", PokeBody("box", "sender", "claude"))
+	if !errors.Is(err, errAlreadyQueued) {
+		t.Fatalf("runCodexQueue() = %v, want errAlreadyQueued", err)
+	}
+	if n := queueCount(t, db, "t1"); n != 1 {
+		t.Fatalf("queue entries=%d, want the legacy wake alone", n)
 	}
 }
 

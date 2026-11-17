@@ -243,7 +243,7 @@ try:
         pager('alias','startup','--session',identity)
         env['PAGER_WAKE']='off'
         pager('send','--human','startup','startup wake regression mail')
-        poke='pager: new mail for startup from sender (claude session). [pager-poke] If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read).'
+        poke='pager: new mail for startup from sender (claude session). [pager-poke] If mail is missing, run msg_list.'
         call('thread/queue/add',{'threadId':identity,'clientUserMessageId':'startup-wake-smoke','input':[{'type':'text','text':poke}]})
         drive_until(lambda:request_count > 0 and native_idle() and not queued(identity),timeout=15)
         assert request_count == 1,request_count

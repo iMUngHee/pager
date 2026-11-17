@@ -24,13 +24,22 @@ const PokeSentinel = "[pager-poke]"
 
 // PokeRecoveryHint is shared by the sender and the hook's standalone-poke
 // check, so adding user text after a poke never turns it into a blocked prompt.
-const PokeRecoveryHint = " If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."
+//
+// It is kept to one short clause because every poke repeats it, and the hook
+// normally renders the mail on the same turn anyway.
+const PokeRecoveryHint = " If mail is missing, run msg_list."
+
+// legacyPokeRecoveryHint is the hint binaries up to 0.8.0 send. An MCP server
+// keeps running the binary it started with, so after an upgrade its pokes
+// still end this way, and a Codex queue may hold some from before.
+const legacyPokeRecoveryHint = " If it is not shown with this turn, run msg_list (or `pager ls`, which shows it without marking it read)."
 
 // IsPokePrompt recognizes a complete generated notification, not user text
 // quoting the marker or appending an instruction to the notification.
 func IsPokePrompt(text string) bool {
 	text = strings.TrimSpace(text)
 	return strings.HasPrefix(text, "pager: new mail for ") &&
-		strings.Contains(text, PokeSentinel) && strings.HasSuffix(text, PokeRecoveryHint) &&
+		strings.Contains(text, PokeSentinel) &&
+		(strings.HasSuffix(text, PokeRecoveryHint) || strings.HasSuffix(text, legacyPokeRecoveryHint)) &&
 		!strings.ContainsAny(text, "\r\n")
 }
